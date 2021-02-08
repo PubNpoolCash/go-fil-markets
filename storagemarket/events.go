@@ -7,8 +7,8 @@ const (
 	// ClientEventOpen indicates a new deal was started
 	ClientEventOpen ClientEvent = iota
 
-	// ClientEventEnsureFundsFailed happens when attempting to ensure the client has enough funds available fails
-	ClientEventEnsureFundsFailed
+	// ClientEventReserveFundsFailed happens when attempting to reserve funds for a deal fails
+	ClientEventReserveFundsFailed
 
 	// ClientEventFundingInitiated happens when a client has sent a message adding funds to its balance
 	ClientEventFundingInitiated
@@ -19,8 +19,8 @@ const (
 	// ClientEventFundsReleased happens when a client released funds for a deal (updating our tracked funds)
 	ClientEventFundsReleased
 
-	// ClientEventFundsEnsured happens when a client successfully ensures it has funds for a deal
-	ClientEventFundsEnsured
+	// ClientEventFundingComplete happens when a client successfully reserves funds for a deal
+	ClientEventFundingComplete
 
 	// ClientEventWriteProposalFailed indicates an attempt to send a deal proposal to a provider failed
 	ClientEventWriteProposalFailed
@@ -31,6 +31,9 @@ const (
 	// ClientEventDataTransferInitiated happens when piece data transfer has started
 	ClientEventDataTransferInitiated
 
+	// ClientEventDataTransferRestarted happens when a data transfer from client to provider is restarted by the client
+	ClientEventDataTransferRestarted
+
 	// ClientEventDataTransferComplete happens when piece data transfer has been completed
 	ClientEventDataTransferComplete
 
@@ -39,6 +42,9 @@ const (
 
 	// ClientEventDataTransferFailed happens the client can't initiate a push data transfer to the provider
 	ClientEventDataTransferFailed
+
+	// ClientEventDataTransferRestartFailed happens when the client can't restart an existing data transfer
+	ClientEventDataTransferRestartFailed
 
 	// ClientEventReadResponseFailed means a network error occurred reading a deal response
 	ClientEventReadResponseFailed
@@ -67,6 +73,12 @@ const (
 	// ClientEventDealPublished happens when a deal is successfully published
 	ClientEventDealPublished
 
+	// ClientEventDealPrecommitFailed happens when an error occurs waiting for deal pre-commit
+	ClientEventDealPrecommitFailed
+
+	// ClientEventDealPrecommitted happens when a deal is successfully pre-commited
+	ClientEventDealPrecommitted
+
 	// ClientEventDealActivationFailed happens when a client cannot verify a deal was activated
 	ClientEventDealActivationFailed
 
@@ -87,16 +99,22 @@ const (
 
 	// ClientEventRestart is used to resume the deal after a state machine shutdown
 	ClientEventRestart
+
+	// ClientEventDataTransferStalled happens when the clients data transfer experiences a disconnect
+	ClientEventDataTransferStalled
+
+	// ClientEventDataTransferCancelled happens when a data transfer is cancelled
+	ClientEventDataTransferCancelled
 )
 
 // ClientEvents maps client event codes to string names
 var ClientEvents = map[ClientEvent]string{
 	ClientEventOpen:                       "ClientEventOpen",
-	ClientEventEnsureFundsFailed:          "ClientEventEnsureFundsFailed",
+	ClientEventReserveFundsFailed:         "ClientEventReserveFundsFailed",
 	ClientEventFundingInitiated:           "ClientEventFundingInitiated",
 	ClientEventFundsReserved:              "ClientEventFundsReserved",
 	ClientEventFundsReleased:              "ClientEventFundsReleased",
-	ClientEventFundsEnsured:               "ClientEventFundsEnsured",
+	ClientEventFundingComplete:            "ClientEventFundingComplete",
 	ClientEventWriteProposalFailed:        "ClientEventWriteProposalFailed",
 	ClientEventInitiateDataTransfer:       "ClientEventInitiateDataTransfer",
 	ClientEventDataTransferInitiated:      "ClientEventDataTransferInitiated",
@@ -119,6 +137,10 @@ var ClientEvents = map[ClientEvent]string{
 	ClientEventDealSlashed:                "ClientEventDealSlashed",
 	ClientEventFailed:                     "ClientEventFailed",
 	ClientEventRestart:                    "ClientEventRestart",
+	ClientEventDataTransferRestarted:      "ClientEventDataTransferRestarted",
+	ClientEventDataTransferRestartFailed:  "ClientEventDataTransferRestartFailed",
+	ClientEventDataTransferStalled:        "ClientEventDataTransferStalled",
+	ClientEventDataTransferCancelled:      "ClientEventDataTransferCancelled",
 }
 
 // ProviderEvent is an event that happens in the provider's deal state machine
@@ -167,6 +189,9 @@ const (
 	// ProviderEventDataTransferInitiated happens when a data transfer starts
 	ProviderEventDataTransferInitiated
 
+	// ProviderEventDataTransferRestarted happens when a data transfer restarts
+	ProviderEventDataTransferRestarted
+
 	// ProviderEventDataTransferCompleted happens when a data transfer is successful
 	ProviderEventDataTransferCompleted
 
@@ -200,21 +225,20 @@ const (
 	// ProviderEventDealHandedOff happens when a deal is successfully handed off to the node for processing in a sector
 	ProviderEventDealHandedOff
 
+	// ProviderEventDealPrecommitFailed happens when an error occurs waiting for deal pre-commit
+	ProviderEventDealPrecommitFailed
+
+	// ProviderEventDealPrecommitted happens when a deal is successfully pre-commited
+	ProviderEventDealPrecommitted
+
 	// ProviderEventDealActivationFailed happens when an error occurs activating a deal
 	ProviderEventDealActivationFailed
-
-	// ProviderEventUnableToLocatePiece happens when an attempt to learn the location of a piece from
-	// the node fails
-	ProviderEventUnableToLocatePiece
 
 	// ProviderEventDealActivated happens when a deal is successfully activated and commited to a sector
 	ProviderEventDealActivated
 
 	// ProviderEventPieceStoreErrored happens when an attempt to save data in the piece store errors
 	ProviderEventPieceStoreErrored
-
-	// ProviderEventReadMetadataErrored happens when an error occurs reading recorded piece metadata
-	ProviderEventReadMetadataErrored
 
 	// ProviderEventFinalized happens when final housekeeping is complete and a deal is active
 	ProviderEventFinalized
@@ -239,44 +263,58 @@ const (
 
 	// ProviderEventRestart is used to resume the deal after a state machine shutdown
 	ProviderEventRestart
+
+	// ProviderEventDataTransferRestartFailed means a data transfer that was restarted by the provider failed
+	// Deprecated: this event is no longer used
+	ProviderEventDataTransferRestartFailed
+
+	// ProviderEventDataTransferStalled happens when the providers data transfer experiences a disconnect
+	ProviderEventDataTransferStalled
+
+	// ProviderEventDataTransferCancelled happens when a data transfer is cancelled
+	ProviderEventDataTransferCancelled
 )
 
 // ProviderEvents maps provider event codes to string names
 var ProviderEvents = map[ProviderEvent]string{
-	ProviderEventOpen:                   "ProviderEventOpen",
-	ProviderEventNodeErrored:            "ProviderEventNodeErrored",
-	ProviderEventDealRejected:           "ProviderEventDealRejected",
-	ProviderEventRejectionSent:          "ProviderEventRejectionSent",
-	ProviderEventDealAccepted:           "ProviderEventDealAccepted",
-	ProviderEventDealDeciding:           "ProviderEventDealDeciding",
-	ProviderEventInsufficientFunds:      "ProviderEventInsufficientFunds",
-	ProviderEventFundsReserved:          "ProviderEventFundsReserved",
-	ProviderEventFundsReleased:          "ProviderEventFundsReleased",
-	ProviderEventFundingInitiated:       "ProviderEventFundingInitiated",
-	ProviderEventFunded:                 "ProviderEventFunded",
-	ProviderEventDataTransferFailed:     "ProviderEventDataTransferFailed",
-	ProviderEventDataRequested:          "ProviderEventDataRequested",
-	ProviderEventDataTransferInitiated:  "ProviderEventDataTransferInitiated",
-	ProviderEventDataTransferCompleted:  "ProviderEventDataTransferCompleted",
-	ProviderEventManualDataReceived:     "ProviderEventManualDataReceived",
-	ProviderEventDataVerificationFailed: "ProviderEventDataVerificationFailed",
-	ProviderEventVerifiedData:           "ProviderEventVerifiedData",
-	ProviderEventSendResponseFailed:     "ProviderEventSendResponseFailed",
-	ProviderEventDealPublishInitiated:   "ProviderEventDealPublishInitiated",
-	ProviderEventDealPublished:          "ProviderEventDealPublished",
-	ProviderEventDealPublishError:       "ProviderEventDealPublishError",
-	ProviderEventFileStoreErrored:       "ProviderEventFileStoreErrored",
-	ProviderEventDealHandoffFailed:      "ProviderEventDealHandoffFailed",
-	ProviderEventDealHandedOff:          "ProviderEventDealHandedOff",
-	ProviderEventDealActivationFailed:   "ProviderEventDealActivationFailed",
-	ProviderEventDealActivated:          "ProviderEventDealActivated",
-	ProviderEventPieceStoreErrored:      "ProviderEventPieceStoreErrored",
-	ProviderEventFinalized:              "ProviderEventCleanupFinished",
-	ProviderEventDealCompletionFailed:   "ProviderEventDealCompletionFailed",
-	ProviderEventMultistoreErrored:      "ProviderEventMultistoreErrored",
-	ProviderEventDealExpired:            "ProviderEventDealExpired",
-	ProviderEventDealSlashed:            "ProviderEventDealSlashed",
-	ProviderEventFailed:                 "ProviderEventFailed",
-	ProviderEventTrackFundsFailed:       "ProviderEventTrackFundsFailed",
-	ProviderEventRestart:                "ProviderEventRestart",
+	ProviderEventOpen:                      "ProviderEventOpen",
+	ProviderEventNodeErrored:               "ProviderEventNodeErrored",
+	ProviderEventDealRejected:              "ProviderEventDealRejected",
+	ProviderEventRejectionSent:             "ProviderEventRejectionSent",
+	ProviderEventDealAccepted:              "ProviderEventDealAccepted",
+	ProviderEventDealDeciding:              "ProviderEventDealDeciding",
+	ProviderEventInsufficientFunds:         "ProviderEventInsufficientFunds",
+	ProviderEventFundsReserved:             "ProviderEventFundsReserved",
+	ProviderEventFundsReleased:             "ProviderEventFundsReleased",
+	ProviderEventFundingInitiated:          "ProviderEventFundingInitiated",
+	ProviderEventFunded:                    "ProviderEventFunded",
+	ProviderEventDataTransferFailed:        "ProviderEventDataTransferFailed",
+	ProviderEventDataRequested:             "ProviderEventDataRequested",
+	ProviderEventDataTransferInitiated:     "ProviderEventDataTransferInitiated",
+	ProviderEventDataTransferCompleted:     "ProviderEventDataTransferCompleted",
+	ProviderEventManualDataReceived:        "ProviderEventManualDataReceived",
+	ProviderEventDataVerificationFailed:    "ProviderEventDataVerificationFailed",
+	ProviderEventVerifiedData:              "ProviderEventVerifiedData",
+	ProviderEventSendResponseFailed:        "ProviderEventSendResponseFailed",
+	ProviderEventDealPublishInitiated:      "ProviderEventDealPublishInitiated",
+	ProviderEventDealPublished:             "ProviderEventDealPublished",
+	ProviderEventDealPublishError:          "ProviderEventDealPublishError",
+	ProviderEventFileStoreErrored:          "ProviderEventFileStoreErrored",
+	ProviderEventDealHandoffFailed:         "ProviderEventDealHandoffFailed",
+	ProviderEventDealHandedOff:             "ProviderEventDealHandedOff",
+	ProviderEventDealActivationFailed:      "ProviderEventDealActivationFailed",
+	ProviderEventDealActivated:             "ProviderEventDealActivated",
+	ProviderEventPieceStoreErrored:         "ProviderEventPieceStoreErrored",
+	ProviderEventFinalized:                 "ProviderEventCleanupFinished",
+	ProviderEventDealCompletionFailed:      "ProviderEventDealCompletionFailed",
+	ProviderEventMultistoreErrored:         "ProviderEventMultistoreErrored",
+	ProviderEventDealExpired:               "ProviderEventDealExpired",
+	ProviderEventDealSlashed:               "ProviderEventDealSlashed",
+	ProviderEventFailed:                    "ProviderEventFailed",
+	ProviderEventTrackFundsFailed:          "ProviderEventTrackFundsFailed",
+	ProviderEventRestart:                   "ProviderEventRestart",
+	ProviderEventDataTransferRestarted:     "ProviderEventDataTransferRestarted",
+	ProviderEventDataTransferRestartFailed: "ProviderEventDataTransferRestartFailed",
+	ProviderEventDataTransferStalled:       "ProviderEventDataTransferStalled",
+	ProviderEventDataTransferCancelled:     "ProviderEventDataTransferCancelled",
 }

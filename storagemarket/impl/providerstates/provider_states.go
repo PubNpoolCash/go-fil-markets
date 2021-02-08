@@ -1,9 +1,9 @@
 package providerstates
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log/v2"
@@ -12,19 +12,18 @@ import (
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-multistore"
-	"github.com/filecoin-project/go-padreader"
+	padreader "github.com/filecoin-project/go-padreader"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/go-state-types/exitcode"
 	"github.com/filecoin-project/go-statemachine/fsm"
-	"github.com/filecoin-project/specs-actors/actors/builtin"
 	"github.com/filecoin-project/specs-actors/actors/builtin/market"
+	market2 "github.com/filecoin-project/specs-actors/v2/actors/builtin/market"
 
 	"github.com/filecoin-project/go-fil-markets/filestore"
 	"github.com/filecoin-project/go-fil-markets/piecestore"
 	"github.com/filecoin-project/go-fil-markets/shared"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/providerutils"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/network"
 )
@@ -34,12 +33,6 @@ var log = logging.Logger("providerstates")
 // TODO: These are copied from spec-actors master, use spec-actors exports when we update
 const DealMaxLabelSize = 256
 
-var DealMinDuration = abi.ChainEpoch(180 * builtin.EpochsInDay) // PARAM_SPEC
-var DealMaxDuration = abi.ChainEpoch(540 * builtin.EpochsInDay) // PARAM_SPEC
-func DealDurationBounds(_ abi.PaddedPieceSize) (min abi.ChainEpoch, max abi.ChainEpoch) {
-	return DealMinDuration, DealMaxDuration // PARAM_FINISH
-}
-
 // ProviderDealEnvironment are the dependencies needed for processing deals
 // with a ProviderStateEntryFunc
 type ProviderDealEnvironment interface {
@@ -47,13 +40,13 @@ type ProviderDealEnvironment interface {
 	Node() storagemarket.StorageProviderNode
 	Ask() storagemarket.StorageAsk
 	DeleteStore(storeID multistore.StoreID) error
-	GeneratePieceCommitmentToFile(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (cid.Cid, filestore.Path, filestore.Path, error)
+	GeneratePieceCommitment(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (cid.Cid, filestore.Path, error)
+	GeneratePieceReader(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (io.ReadCloser, uint64, error, <-chan error)
 	SendSignedResponse(ctx context.Context, response *network.Response) error
 	Disconnect(proposalCid cid.Cid) error
 	FileStore() filestore.FileStore
 	PieceStore() piecestore.PieceStore
 	RunCustomDecisionLogic(context.Context, storagemarket.MinerDeal) (bool, string, error)
-	DealFunds() funds.DealFunds
 	network.PeerTagger
 }
 
@@ -103,9 +96,9 @@ func ValidateDealProposal(ctx fsm.Context, environment ProviderDealEnvironment, 
 		return ctx.Trigger(storagemarket.ProviderEventDealRejected, xerrors.Errorf("deal start epoch has already elapsed"))
 	}
 
-	minDuration, maxDuration := DealDurationBounds(proposal.PieceSize)
+	minDuration, maxDuration := market2.DealDurationBounds(proposal.PieceSize)
 	if proposal.Duration() < minDuration || proposal.Duration() > maxDuration {
-		return ctx.Trigger(storagemarket.ProviderEventDealRejected, xerrors.Errorf("deal duration out of bounds"))
+		return ctx.Trigger(storagemarket.ProviderEventDealRejected, xerrors.Errorf("deal duration out of bounds (min, max, provided): %d, %d, %d", minDuration, maxDuration, proposal.Duration()))
 	}
 
 	pcMin, pcMax, err := environment.Node().DealProviderCollateralBounds(ctx.Context(), proposal.PieceSize, proposal.VerifiedDeal)
@@ -151,7 +144,7 @@ func ValidateDealProposal(ctx fsm.Context, environment ProviderDealEnvironment, 
 	// This doesn't guarantee that the client won't withdraw / lock those funds
 	// but it's a decent first filter
 	if clientMarketBalance.Available.LessThan(proposal.ClientBalanceRequirement()) {
-		return ctx.Trigger(storagemarket.ProviderEventDealRejected, xerrors.New("clientMarketBalance.Available too small"))
+		return ctx.Trigger(storagemarket.ProviderEventDealRejected, xerrors.Errorf("clientMarketBalance.Available too small: %d < %d", clientMarketBalance.Available, proposal.ClientBalanceRequirement()))
 	}
 
 	// Verified deal checks
@@ -204,22 +197,21 @@ func DecideOnProposal(ctx fsm.Context, environment ProviderDealEnvironment, deal
 // VerifyData verifies that data received for a deal matches the pieceCID
 // in the proposal
 func VerifyData(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
-
-	pieceCid, piecePath, metadataPath, err := environment.GeneratePieceCommitmentToFile(deal.StoreID, deal.Ref.Root, shared.AllSelector())
+	pieceCid, metadataPath, err := environment.GeneratePieceCommitment(deal.StoreID, deal.Ref.Root, shared.AllSelector())
 	if err != nil {
-		return ctx.Trigger(storagemarket.ProviderEventDataVerificationFailed, xerrors.Errorf("error generating CommP: %w", err))
+		return ctx.Trigger(storagemarket.ProviderEventDataVerificationFailed, xerrors.Errorf("error generating CommP: %w", err), filestore.Path(""), filestore.Path(""))
 	}
 
 	// Verify CommP matches
 	if pieceCid != deal.Proposal.PieceCID {
-		return ctx.Trigger(storagemarket.ProviderEventDataVerificationFailed, xerrors.Errorf("proposal CommP doesn't match calculated CommP"))
+		return ctx.Trigger(storagemarket.ProviderEventDataVerificationFailed, xerrors.Errorf("proposal CommP doesn't match calculated CommP"), filestore.Path(""), metadataPath)
 	}
 
-	return ctx.Trigger(storagemarket.ProviderEventVerifiedData, piecePath, metadataPath)
+	return ctx.Trigger(storagemarket.ProviderEventVerifiedData, filestore.Path(""), metadataPath)
 }
 
-// EnsureProviderFunds adds funds, as needed to the StorageMarketActor, so the miner has adequate collateral for the deal
-func EnsureProviderFunds(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
+// ReserveProviderFunds adds funds, as needed to the StorageMarketActor, so the miner has adequate collateral for the deal
+func ReserveProviderFunds(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
 	node := environment.Node()
 
 	tok, _, err := node.GetChainHead(ctx.Context())
@@ -231,25 +223,15 @@ func EnsureProviderFunds(ctx fsm.Context, environment ProviderDealEnvironment, d
 	if err != nil {
 		return ctx.Trigger(storagemarket.ProviderEventNodeErrored, xerrors.Errorf("looking up miner worker: %w", err))
 	}
-	var requiredFunds abi.TokenAmount
-	if deal.FundsReserved.Nil() || deal.FundsReserved.IsZero() {
-		requiredFunds, err = environment.DealFunds().Reserve(deal.Proposal.ProviderCollateral)
-		if err != nil {
-			return ctx.Trigger(storagemarket.ProviderEventTrackFundsFailed, xerrors.Errorf("tracking deal funds: %w", err))
-		}
-	} else {
-		requiredFunds = environment.DealFunds().Get()
+
+	mcid, err := node.ReserveFunds(ctx.Context(), waddr, deal.Proposal.Provider, deal.Proposal.ProviderCollateral)
+	if err != nil {
+		return ctx.Trigger(storagemarket.ProviderEventNodeErrored, xerrors.Errorf("reserving funds: %w", err))
 	}
 
 	_ = ctx.Trigger(storagemarket.ProviderEventFundsReserved, deal.Proposal.ProviderCollateral)
 
-	mcid, err := node.EnsureFunds(ctx.Context(), deal.Proposal.Provider, waddr, requiredFunds, tok)
-
-	if err != nil {
-		return ctx.Trigger(storagemarket.ProviderEventNodeErrored, xerrors.Errorf("ensuring funds: %w", err))
-	}
-
-	// if no message was sent, and there was no error, it was instantaneous
+	// if no message was sent, and there was no error, funds were already available
 	if mcid == cid.Undef {
 		return ctx.Trigger(storagemarket.ProviderEventFunded)
 	}
@@ -290,50 +272,98 @@ func PublishDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal stor
 	return ctx.Trigger(storagemarket.ProviderEventDealPublishInitiated, mcid)
 }
 
-// WaitForPublish waits for the publish message on chain and sends the deal id back to the client
+// WaitForPublish waits for the publish message on chain and saves the deal id
+// so it can be sent back to the client
 func WaitForPublish(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
-	return environment.Node().WaitForMessage(ctx.Context(), *deal.PublishCid, func(code exitcode.ExitCode, retBytes []byte, finalCid cid.Cid, err error) error {
-		if err != nil {
-			return ctx.Trigger(storagemarket.ProviderEventDealPublishError, xerrors.Errorf("PublishStorageDeals errored: %w", err))
-		}
-		if code != exitcode.Ok {
-			return ctx.Trigger(storagemarket.ProviderEventDealPublishError, xerrors.Errorf("PublishStorageDeals exit code: %s", code.String()))
-		}
-		var retval market.PublishStorageDealsReturn
-		err = retval.UnmarshalCBOR(bytes.NewReader(retBytes))
-		if err != nil {
-			return ctx.Trigger(storagemarket.ProviderEventDealPublishError, xerrors.Errorf("PublishStorageDeals error unmarshalling result: %w", err))
-		}
+	res, err := environment.Node().WaitForPublishDeals(ctx.Context(), *deal.PublishCid, deal.Proposal)
+	if err != nil {
+		return ctx.Trigger(storagemarket.ProviderEventDealPublishError, xerrors.Errorf("PublishStorageDeals errored: %w", err))
+	}
 
-		if !deal.FundsReserved.Nil() && !deal.FundsReserved.IsZero() {
-			_, err = environment.DealFunds().Release(deal.FundsReserved)
-			if err != nil {
-				// nonfatal error
-				log.Warnf("failed to release funds from local tracker: %s", err)
-			}
-			_ = ctx.Trigger(storagemarket.ProviderEventFundsReleased, deal.FundsReserved)
-		}
+	// Once the deal has been published, release funds that were reserved
+	// for deal publishing
+	releaseReservedFunds(ctx, environment, deal)
 
-		return ctx.Trigger(storagemarket.ProviderEventDealPublished, retval.IDs[0], finalCid)
-	})
+	return ctx.Trigger(storagemarket.ProviderEventDealPublished, res.DealID, res.FinalCid)
 }
 
 // HandoffDeal hands off a published deal for sealing and commitment in a sector
 func HandoffDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
-	file, err := environment.FileStore().Open(deal.PiecePath)
-	if err != nil {
-		return ctx.Trigger(storagemarket.ProviderEventFileStoreErrored, xerrors.Errorf("reading piece at path %s: %w", deal.PiecePath, err))
+	triggerHandoffFailed := func(err error, packingErr error) error {
+		if packingErr == nil {
+			return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
+		}
+		packingErr = xerrors.Errorf("packing error: %w", packingErr)
+		err = xerrors.Errorf("%s: %w", err, packingErr)
+		return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
 	}
-	if deal.StoreID != nil {
-		err := environment.DeleteStore(*deal.StoreID)
+
+	var packingInfo *storagemarket.PackingResult
+	if deal.PiecePath != "" {
+		// Data for offline deals is stored on disk, so if PiecePath is set,
+		// create a Reader from the file path
+		file, err := environment.FileStore().Open(deal.PiecePath)
 		if err != nil {
-			return ctx.Trigger(storagemarket.ProviderEventMultistoreErrored, xerrors.Errorf("unable to delete store %d: %w", *deal.StoreID, err))
+			return ctx.Trigger(storagemarket.ProviderEventFileStoreErrored,
+				xerrors.Errorf("reading piece at path %s: %w", deal.PiecePath, err))
+		}
+
+		// Hand the deal off to the process that adds it to a sector
+		packingInfo, err = handoffDeal(ctx.Context(), environment, deal, file, uint64(file.Size()))
+		if err != nil {
+			err = xerrors.Errorf("packing piece at path %s: %w", deal.PiecePath, err)
+			return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
+		}
+	} else {
+		// Create a reader to read the piece from the blockstore
+		pieceReader, pieceSize, err, writeErrChan := environment.GeneratePieceReader(deal.StoreID, deal.Ref.Root, shared.AllSelector())
+		if err != nil {
+			err := xerrors.Errorf("reading piece %s from store %d: %w", deal.Ref.PieceCid, deal.StoreID, err)
+			return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
+		}
+
+		// Hand the deal off to the process that adds it to a sector
+		var packingErr error
+		packingInfo, packingErr = handoffDeal(ctx.Context(), environment, deal, pieceReader, pieceSize)
+
+		// Close the read side of the pipe
+		err = pieceReader.Close()
+		if err != nil {
+			err = xerrors.Errorf("closing reader for piece %s from store %d: %w", deal.Ref.PieceCid, deal.StoreID, err)
+			return triggerHandoffFailed(err, packingErr)
+		}
+
+		// Wait for the write to complete
+		select {
+		case <-ctx.Context().Done():
+			return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed,
+				xerrors.Errorf("writing piece %s never finished: %w", deal.Ref.PieceCid, ctx.Context().Err()))
+		case err = <-writeErrChan:
+			if err != nil {
+				err = xerrors.Errorf("writing piece %s: %w", deal.Ref.PieceCid, err)
+				return triggerHandoffFailed(err, packingErr)
+			}
+		}
+
+		if packingErr != nil {
+			err = xerrors.Errorf("packing piece %s: %w", deal.Ref.PieceCid, packingErr)
+			return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
 		}
 	}
 
-	paddedReader, paddedSize := padreader.New(file, uint64(file.Size()))
-	packingInfo, err := environment.Node().OnDealComplete(
-		ctx.Context(),
+	if err := recordPiece(environment, deal, packingInfo.SectorNumber, packingInfo.Offset, packingInfo.Size); err != nil {
+		err = xerrors.Errorf("failed to register deal data for piece %s for retrieval: %w", deal.Ref.PieceCid, err)
+		log.Error(err.Error())
+		_ = ctx.Trigger(storagemarket.ProviderEventPieceStoreErrored, err)
+	}
+
+	return ctx.Trigger(storagemarket.ProviderEventDealHandedOff)
+}
+
+func handoffDeal(ctx context.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal, reader io.Reader, size uint64) (*storagemarket.PackingResult, error) {
+	paddedReader, paddedSize := padreader.New(reader, size)
+	return environment.Node().OnDealComplete(
+		ctx,
 		storagemarket.MinerDeal{
 			Client:             deal.Client,
 			ClientDealProposal: deal.ClientDealProposal,
@@ -347,16 +377,6 @@ func HandoffDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal stor
 		paddedSize,
 		paddedReader,
 	)
-	if err != nil {
-		return ctx.Trigger(storagemarket.ProviderEventDealHandoffFailed, err)
-	}
-
-	if err := recordPiece(environment, deal, packingInfo.SectorNumber, packingInfo.Offset, packingInfo.Size); err != nil {
-		log.Errorf("failed to register deal data for retrieval: %s", err)
-		_ = ctx.Trigger(storagemarket.ProviderEventPieceStoreErrored, err)
-	}
-
-	return ctx.Trigger(storagemarket.ProviderEventDealHandedOff)
 }
 
 func recordPiece(environment ProviderDealEnvironment, deal storagemarket.MinerDeal, sectorID abi.SectorNumber, offset, length abi.PaddedPieceSize) error {
@@ -393,18 +413,52 @@ func recordPiece(environment ProviderDealEnvironment, deal storagemarket.MinerDe
 
 // CleanupDeal clears the filestore once we know the mining component has read the data and it is in a sealed sector
 func CleanupDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
-	err := environment.FileStore().Delete(deal.PiecePath)
-	if err != nil {
-		log.Warnf("deleting piece at path %s: %w", deal.PiecePath, err)
+	if deal.PiecePath != "" {
+		err := environment.FileStore().Delete(deal.PiecePath)
+		if err != nil {
+			log.Warnf("deleting piece at path %s: %w", deal.PiecePath, err)
+		}
 	}
-	if deal.MetadataPath != filestore.Path("") {
+	if deal.MetadataPath != "" {
 		err := environment.FileStore().Delete(deal.MetadataPath)
 		if err != nil {
 			log.Warnf("deleting piece at path %s: %w", deal.MetadataPath, err)
 		}
 	}
+	if deal.StoreID != nil {
+		err := environment.DeleteStore(*deal.StoreID)
+		if err != nil {
+			log.Warnf("deleting store %d: %w", deal.StoreID, err)
+		}
+	}
 
 	return ctx.Trigger(storagemarket.ProviderEventFinalized)
+}
+
+// VerifyDealPreCommitted verifies that a deal has been pre-committed
+func VerifyDealPreCommitted(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) error {
+	cb := func(sectorNumber abi.SectorNumber, isActive bool, err error) {
+		// It's possible that
+		// - we miss the pre-commit message and have to wait for prove-commit
+		// - the deal is already active (for example if the node is restarted
+		//   while waiting for pre-commit)
+		// In either of these two cases, isActive will be true.
+		switch {
+		case err != nil:
+			_ = ctx.Trigger(storagemarket.ProviderEventDealPrecommitFailed, err)
+		case isActive:
+			_ = ctx.Trigger(storagemarket.ProviderEventDealActivated)
+		default:
+			_ = ctx.Trigger(storagemarket.ProviderEventDealPrecommitted, sectorNumber)
+		}
+	}
+
+	err := environment.Node().OnDealSectorPreCommitted(ctx.Context(), deal.Proposal.Provider, deal.DealID, deal.Proposal, deal.PublishCid, cb)
+
+	if err != nil {
+		return ctx.Trigger(storagemarket.ProviderEventDealPrecommitFailed, err)
+	}
+	return nil
 }
 
 // VerifyDealActivated verifies that a deal has been committed to a sector and activated
@@ -418,7 +472,7 @@ func VerifyDealActivated(ctx fsm.Context, environment ProviderDealEnvironment, d
 		}
 	}
 
-	err := environment.Node().OnDealSectorCommitted(ctx.Context(), deal.Proposal.Provider, deal.DealID, cb)
+	err := environment.Node().OnDealSectorCommitted(ctx.Context(), deal.Proposal.Provider, deal.DealID, deal.SectorNumber, deal.Proposal, deal.PublishCid, cb)
 
 	if err != nil {
 		return ctx.Trigger(storagemarket.ProviderEventDealActivationFailed, err)
@@ -501,14 +555,18 @@ func FailDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal storage
 			log.Warnf("deleting store id %d: %w", *deal.StoreID, err)
 		}
 	}
+	releaseReservedFunds(ctx, environment, deal)
+
+	return ctx.Trigger(storagemarket.ProviderEventFailed)
+}
+
+func releaseReservedFunds(ctx fsm.Context, environment ProviderDealEnvironment, deal storagemarket.MinerDeal) {
 	if !deal.FundsReserved.Nil() && !deal.FundsReserved.IsZero() {
-		_, err := environment.DealFunds().Release(deal.FundsReserved)
+		err := environment.Node().ReleaseFunds(ctx.Context(), deal.Proposal.Provider, deal.FundsReserved)
 		if err != nil {
 			// nonfatal error
-			log.Warnf("failed to release funds from local tracker: %s", err)
+			log.Warnf("failed to release funds: %s", err)
 		}
 		_ = ctx.Trigger(storagemarket.ProviderEventFundsReleased, deal.FundsReserved)
 	}
-
-	return ctx.Trigger(storagemarket.ProviderEventFailed)
 }

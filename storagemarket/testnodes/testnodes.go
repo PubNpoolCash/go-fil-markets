@@ -74,12 +74,17 @@ func (sma *StorageMarketState) StateKey() (shared.TipSetToken, abi.ChainEpoch) {
 // where responses are stubbed
 type FakeCommonNode struct {
 	SMState                    *StorageMarketState
+	DealFunds                  *shared_testutil.TestDealFunds
 	AddFundsCid                cid.Cid
-	EnsureFundsError           error
+	ReserveFundsError          error
 	VerifySignatureFails       bool
 	GetBalanceError            error
 	GetChainHeadError          error
 	SignBytesError             error
+	PreCommittedSectorNumber   abi.SectorNumber
+	PreCommittedIsActive       bool
+	DealPreCommittedSyncError  error
+	DealPreCommittedAsyncError error
 	DealCommittedSyncError     error
 	DealCommittedAsyncError    error
 	WaitForDealCompletionError error
@@ -100,11 +105,17 @@ type FakeCommonNode struct {
 
 // DelayFakeCommonNode allows configuring delay in the FakeCommonNode functions
 type DelayFakeCommonNode struct {
+	OnDealSectorPreCommitted     bool
+	OnDealSectorPreCommittedChan chan struct{}
+
 	OnDealSectorCommitted     bool
 	OnDealSectorCommittedChan chan struct{}
 
 	OnDealExpiredOrSlashed     bool
 	OnDealExpiredOrSlashedChan chan struct{}
+
+	ValidatePublishedDeal     bool
+	ValidatePublishedDealChan chan struct{}
 }
 
 // GetChainHead returns the state id in the storage market state
@@ -123,16 +134,23 @@ func (n *FakeCommonNode) AddFunds(ctx context.Context, addr address.Address, amo
 	return n.AddFundsCid, nil
 }
 
-// EnsureFunds adds funds to the given actor in the storage market state to ensure it has at least the given amount
-func (n *FakeCommonNode) EnsureFunds(ctx context.Context, addr, wallet address.Address, amount abi.TokenAmount, tok shared.TipSetToken) (cid.Cid, error) {
-	if n.EnsureFundsError == nil {
+// ReserveFunds reserves funds required for a deal with the storage market actor
+func (n *FakeCommonNode) ReserveFunds(ctx context.Context, wallet, addr address.Address, amt abi.TokenAmount) (cid.Cid, error) {
+	if n.ReserveFundsError == nil {
+		_, _ = n.DealFunds.Reserve(amt)
 		balance := n.SMState.Balance(addr)
-		if balance.Available.LessThan(amount) {
-			return n.AddFunds(ctx, addr, big.Sub(amount, balance.Available))
+		if balance.Available.LessThan(amt) {
+			return n.AddFunds(ctx, addr, big.Sub(amt, balance.Available))
 		}
 	}
 
-	return cid.Undef, n.EnsureFundsError
+	return cid.Undef, n.ReserveFundsError
+}
+
+// ReleaseFunds releases funds reserved with ReserveFunds
+func (n *FakeCommonNode) ReleaseFunds(ctx context.Context, addr address.Address, amt abi.TokenAmount) error {
+	n.DealFunds.Release(amt)
+	return nil
 }
 
 // WaitForMessage simulates waiting for a message to appear on chain
@@ -181,8 +199,23 @@ func (n *FakeCommonNode) DealProviderCollateralBounds(ctx context.Context, size 
 	return abi.NewTokenAmount(5000), builtin.TotalFilecoin, nil
 }
 
+// OnDealSectorPreCommitted returns immediately, and returns stubbed errors
+func (n *FakeCommonNode) OnDealSectorPreCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, proposal market.DealProposal, publishCid *cid.Cid, cb storagemarket.DealSectorPreCommittedCallback) error {
+	if n.DelayFakeCommonNode.OnDealSectorPreCommitted {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-n.DelayFakeCommonNode.OnDealSectorPreCommittedChan:
+		}
+	}
+	if n.DealPreCommittedSyncError == nil {
+		cb(n.PreCommittedSectorNumber, n.PreCommittedIsActive, n.DealPreCommittedAsyncError)
+	}
+	return n.DealPreCommittedSyncError
+}
+
 // OnDealSectorCommitted returns immediately, and returns stubbed errors
-func (n *FakeCommonNode) OnDealSectorCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, cb storagemarket.DealSectorCommittedCallback) error {
+func (n *FakeCommonNode) OnDealSectorCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, sectorNumber abi.SectorNumber, proposal market.DealProposal, publishCid *cid.Cid, cb storagemarket.DealSectorCommittedCallback) error {
 	if n.DelayFakeCommonNode.OnDealSectorCommitted {
 		select {
 		case <-ctx.Done():
@@ -256,6 +289,14 @@ func (n *FakeClientNode) ListStorageProviders(ctx context.Context, tok shared.Ti
 
 // ValidatePublishedDeal always succeeds
 func (n *FakeClientNode) ValidatePublishedDeal(ctx context.Context, deal storagemarket.ClientDeal) (abi.DealID, error) {
+	if n.DelayFakeCommonNode.ValidatePublishedDeal {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-n.DelayFakeCommonNode.ValidatePublishedDealChan:
+		}
+	}
+
 	return n.ValidatePublishedDealID, n.ValidatePublishedError
 }
 
@@ -297,6 +338,7 @@ type FakeProviderNode struct {
 	PieceSectorID                       uint64
 	PublishDealID                       abi.DealID
 	PublishDealsError                   error
+	WaitForPublishDealsError            error
 	OnDealCompleteError                 error
 	LastOnDealCompleteBytes             []byte
 	OnDealCompleteCalls                 []storagemarket.MinerDeal
@@ -311,6 +353,24 @@ func (n *FakeProviderNode) PublishDeals(ctx context.Context, deal storagemarket.
 		return shared_testutil.GenerateCids(1)[0], nil
 	}
 	return cid.Undef, n.PublishDealsError
+}
+
+// WaitForPublishDeals simulates waiting for the deal to be published and
+// calling the callback with the results
+func (n *FakeProviderNode) WaitForPublishDeals(ctx context.Context, mcid cid.Cid, proposal market.DealProposal) (*storagemarket.PublishDealsWaitResult, error) {
+	if n.WaitForPublishDealsError != nil {
+		return nil, n.WaitForPublishDealsError
+	}
+
+	finalCid := n.WaitForMessageFinalCid
+	if finalCid.Equals(cid.Undef) {
+		finalCid = mcid
+	}
+
+	return &storagemarket.PublishDealsWaitResult{
+		DealID:   n.PublishDealID,
+		FinalCid: finalCid,
+	}, nil
 }
 
 // OnDealComplete simulates passing of the deal to the storage miner, and does nothing
@@ -340,6 +400,11 @@ func (n *FakeProviderNode) LocatePieceForDealWithinSector(ctx context.Context, d
 // GetDataCap gets the current data cap for addr
 func (n *FakeProviderNode) GetDataCap(ctx context.Context, addr address.Address, tok shared.TipSetToken) (*verifreg.DataCap, error) {
 	return n.DataCap, n.GetDataCapErr
+}
+
+// GetProofType returns the miner's proof type.
+func (n *FakeProviderNode) GetProofType(ctx context.Context, addr address.Address, tok shared.TipSetToken) (abi.RegisteredSealProof, error) {
+	return abi.RegisteredSealProof_StackedDrg2KiBV1, nil
 }
 
 var _ storagemarket.StorageProviderNode = (*FakeProviderNode)(nil)

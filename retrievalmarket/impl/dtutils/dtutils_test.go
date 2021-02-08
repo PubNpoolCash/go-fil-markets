@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/ipfs/go-cid"
 	"github.com/ipld/go-ipld-prime"
 	peer "github.com/libp2p/go-libp2p-core/peer"
 	"github.com/stretchr/testify/require"
@@ -89,6 +90,20 @@ func TestProviderDataTransferSubscriber(t *testing.T) {
 			expectedEvent: rm.ProviderEventDataTransferError,
 			expectedArgs:  []interface{}{errors.New("deal data transfer failed: something went wrong")},
 		},
+		"disconnected": {
+			code:    datatransfer.Disconnected,
+			message: "something went wrong",
+			state: shared_testutil.TestChannelParams{
+				IsPull:     true,
+				TransferID: transferID,
+				Sender:     testPeers[0],
+				Recipient:  testPeers[1],
+				Vouchers:   []datatransfer.Voucher{&dealProposal},
+				Status:     datatransfer.Ongoing},
+			expectedID:    rm.ProviderDealIdentifier{DealID: dealProposal.ID, Receiver: testPeers[1]},
+			expectedEvent: rm.ProviderEventDataTransferError,
+			expectedArgs:  []interface{}{errors.New("deal data transfer stalled (peer hungup)")},
+		},
 		"completed": {
 			code: datatransfer.ResumeResponder,
 			state: shared_testutil.TestChannelParams{
@@ -100,6 +115,18 @@ func TestProviderDataTransferSubscriber(t *testing.T) {
 				Status:     datatransfer.Completed},
 			expectedID:    rm.ProviderDealIdentifier{DealID: dealProposal.ID, Receiver: testPeers[1]},
 			expectedEvent: rm.ProviderEventComplete,
+		},
+		"cancel": {
+			code: datatransfer.Cancel,
+			state: shared_testutil.TestChannelParams{
+				IsPull:     true,
+				TransferID: transferID,
+				Sender:     testPeers[0],
+				Recipient:  testPeers[1],
+				Vouchers:   []datatransfer.Voucher{&dealProposal},
+				Status:     datatransfer.Completed},
+			expectedID:    rm.ProviderDealIdentifier{DealID: dealProposal.ID, Receiver: testPeers[1]},
+			expectedEvent: rm.ProviderEventClientCancelled,
 		},
 	}
 	for test, data := range tests {
@@ -147,7 +174,7 @@ func TestClientDataTransferSubscriber(t *testing.T) {
 			ignored: true,
 		},
 		"progress": {
-			code: datatransfer.Progress,
+			code: datatransfer.DataReceived,
 			state: shared_testutil.TestChannelParams{
 				Vouchers: []datatransfer.Voucher{&dealProposal},
 				Status:   datatransfer.Ongoing,
@@ -285,6 +312,16 @@ func TestClientDataTransferSubscriber(t *testing.T) {
 			expectedID:    dealProposal.ID,
 			expectedEvent: rm.ClientEventDataTransferError,
 			expectedArgs:  []interface{}{errors.New("deal data transfer failed: something went wrong")},
+		},
+		"disconnected": {
+			code:    datatransfer.Disconnected,
+			message: "something went wrong",
+			state: shared_testutil.TestChannelParams{
+				Vouchers: []datatransfer.Voucher{&dealProposal},
+				Status:   datatransfer.Ongoing},
+			expectedID:    dealProposal.ID,
+			expectedEvent: rm.ClientEventDataTransferError,
+			expectedArgs:  []interface{}{errors.New("deal data transfer stalled (peer hungup)")},
 		},
 		"error, response rejected": {
 			code:    datatransfer.Error,
@@ -433,7 +470,8 @@ func (fsg *fakeStoreGetter) Get(otherPeer peer.ID, dealID rm.DealID) (*multistor
 
 type fakeTransport struct{}
 
-func (ft *fakeTransport) OpenChannel(ctx context.Context, dataSender peer.ID, channelID datatransfer.ChannelID, root ipld.Link, stor ipld.Node, msg datatransfer.Message) error {
+func (ft *fakeTransport) OpenChannel(ctx context.Context, dataSender peer.ID, channelID datatransfer.ChannelID, root ipld.Link, stor ipld.Node,
+	doNotSend []cid.Cid, msg datatransfer.Message) error {
 	return nil
 }
 
@@ -446,6 +484,10 @@ func (ft *fakeTransport) SetEventHandler(events datatransfer.EventsHandler) erro
 }
 
 func (ft *fakeTransport) CleanupChannel(chid datatransfer.ChannelID) {
+}
+
+func (ft *fakeTransport) Shutdown(context.Context) error {
+	return nil
 }
 
 type fakeGsTransport struct {

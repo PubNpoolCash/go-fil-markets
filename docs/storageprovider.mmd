@@ -13,11 +13,13 @@ stateDiagram-v2
 	state "StorageDealTransferring" as 17
 	state "StorageDealWaitingForData" as 18
 	state "StorageDealVerifyData" as 19
-	state "StorageDealEnsureProviderFunds" as 20
+	state "StorageDealReserveProviderFunds" as 20
 	state "StorageDealProviderFunding" as 22
 	state "StorageDealPublish" as 24
 	state "StorageDealPublishing" as 25
 	state "StorageDealError" as 26
+	state "StorageDealProviderTransferAwaitRestart" as 27
+	state "StorageDealAwaitingPreCommit" as 29
 	4 : On entry runs HandoffDeal
 	5 : On entry runs VerifyDealActivated
 	6 : On entry runs CleanupDeal
@@ -27,10 +29,11 @@ stateDiagram-v2
 	14 : On entry runs ValidateDealProposal
 	15 : On entry runs DecideOnProposal
 	19 : On entry runs VerifyData
-	20 : On entry runs EnsureProviderFunds
+	20 : On entry runs ReserveProviderFunds
 	22 : On entry runs WaitForFunding
 	24 : On entry runs PublishDeal
 	25 : On entry runs WaitForPublish
+	29 : On entry runs VerifyDealPreCommitted
 	[*] --> 0
 	note right of 0
 		The following events are not shown cause they can trigger from any state.
@@ -46,8 +49,16 @@ stateDiagram-v2
 	14 --> 15 : ProviderEventDealDeciding
 	15 --> 18 : ProviderEventDataRequested
 	17 --> 11 : ProviderEventDataTransferFailed
+	27 --> 11 : ProviderEventDataTransferFailed
 	18 --> 17 : ProviderEventDataTransferInitiated
+	27 --> 17 : ProviderEventDataTransferInitiated
+	18 --> 17 : ProviderEventDataTransferRestarted
+	27 --> 17 : ProviderEventDataTransferRestarted
+	17 --> 11 : ProviderEventDataTransferCancelled
+	18 --> 11 : ProviderEventDataTransferCancelled
+	27 --> 11 : ProviderEventDataTransferCancelled
 	17 --> 19 : ProviderEventDataTransferCompleted
+	27 --> 19 : ProviderEventDataTransferCompleted
 	19 --> 11 : ProviderEventDataVerificationFailed
 	18 --> 20 : ProviderEventVerifiedData
 	19 --> 20 : ProviderEventVerifiedData
@@ -62,11 +73,15 @@ stateDiagram-v2
 	4 --> 11 : ProviderEventFileStoreErrored
 	5 --> 11 : ProviderEventFileStoreErrored
 	7 --> 11 : ProviderEventFileStoreErrored
+	29 --> 11 : ProviderEventFileStoreErrored
 	4 --> 11 : ProviderEventMultistoreErrored
 	4 --> 11 : ProviderEventDealHandoffFailed
-	4 --> 5 : ProviderEventDealHandedOff
+	4 --> 29 : ProviderEventDealHandedOff
+	29 --> 11 : <invalid Value>
+	29 --> 5 : <invalid Value>
 	5 --> 11 : ProviderEventDealActivationFailed
 	5 --> 6 : ProviderEventDealActivated
+	29 --> 6 : ProviderEventDealActivated
 	6 --> 7 : ProviderEventCleanupFinished
 	7 --> 9 : ProviderEventDealSlashed
 	7 --> 8 : ProviderEventDealExpired
@@ -75,6 +90,7 @@ stateDiagram-v2
 	10 --> 26 : ProviderEventRestart
 	14 --> 26 : ProviderEventRestart
 	15 --> 26 : ProviderEventRestart
+	17 --> 27 : ProviderEventRestart
 	20 --> 11 : ProviderEventTrackFundsFailed
 
 	note left of 4 : The following events only record in this state.<br><br>ProviderEventPieceStoreErrored
@@ -83,10 +99,16 @@ stateDiagram-v2
 	note left of 11 : The following events only record in this state.<br><br>ProviderEventFundsReleased
 
 
+	note left of 17 : The following events only record in this state.<br><br>ProviderEventDataTransferRestarted<br>ProviderEventDataTransferStalled
+
+
 	note left of 20 : The following events only record in this state.<br><br>ProviderEventFundsReserved
 
 
 	note left of 25 : The following events only record in this state.<br><br>ProviderEventFundsReleased
+
+
+	note left of 27 : The following events only record in this state.<br><br>ProviderEventDataTransferStalled
 
 	26 --> [*]
 	9 --> [*]

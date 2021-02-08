@@ -10,6 +10,8 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
+	graphsyncimpl "github.com/ipfs/go-graphsync/impl"
+	"github.com/ipfs/go-graphsync/network"
 	"github.com/ipld/go-ipld-prime"
 	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
 	basicnode "github.com/ipld/go-ipld-prime/node/basic"
@@ -18,14 +20,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-commp-utils/pieceio/cario"
 	dtimpl "github.com/filecoin-project/go-data-transfer/impl"
+	"github.com/filecoin-project/go-data-transfer/testutil"
 	dtgstransport "github.com/filecoin-project/go-data-transfer/transport/graphsync"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/specs-actors/actors/builtin/paych"
 
-	"github.com/filecoin-project/go-fil-markets/pieceio/cario"
 	"github.com/filecoin-project/go-fil-markets/piecestore"
 	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
 	retrievalimpl "github.com/filecoin-project/go-fil-markets/retrievalmarket/impl"
@@ -90,23 +93,25 @@ func requireSetupTestClientAndProvider(ctx context.Context, t *testing.T, payChA
 	retrievalmarket.RetrievalPeer,
 	retrievalmarket.RetrievalProvider) {
 	testData := tut.NewLibp2pTestData(ctx, t)
-	nw1 := rmnet.NewFromLibp2pHost(testData.Host1, rmnet.RetryParameters(100*time.Millisecond, 1*time.Second, 5))
+	nw1 := rmnet.NewFromLibp2pHost(testData.Host1, rmnet.RetryParameters(100*time.Millisecond, 1*time.Second, 5, 5))
 	cids := tut.GenerateCids(2)
 	rcNode1 := testnodes.NewTestRetrievalClientNode(testnodes.TestRetrievalClientNodeParams{
 		PayCh:          payChAddr,
 		CreatePaychCID: cids[0],
 		AddFundsCID:    cids[1],
 	})
-	dtTransport1 := dtgstransport.NewTransport(testData.Host1.ID(), testData.GraphSync1)
-	dt1, err := dtimpl.NewDataTransfer(testData.DTStore1, testData.DTNet1, dtTransport1, testData.DTStoredCounter1)
+
+	gs1 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host1), testData.Loader1, testData.Storer1)
+	dtTransport1 := dtgstransport.NewTransport(testData.Host1.ID(), gs1)
+	dt1, err := dtimpl.NewDataTransfer(testData.DTStore1, testData.DTTmpDir1, testData.DTNet1, dtTransport1, testData.DTStoredCounter1)
 	require.NoError(t, err)
-	err = dt1.Start(ctx)
+	testutil.StartAndWaitForReady(ctx, t, dt1)
 	require.NoError(t, err)
 	clientDs := namespace.Wrap(testData.Ds1, datastore.NewKey("/retrievals/client"))
 	client, err := retrievalimpl.NewClient(nw1, testData.MultiStore1, dt1, rcNode1, &tut.TestPeerResolver{}, clientDs, testData.RetrievalStoredCounter1)
 	require.NoError(t, err)
 	tut.StartAndWaitForReady(ctx, t, client)
-	nw2 := rmnet.NewFromLibp2pHost(testData.Host2, rmnet.RetryParameters(0, 0, 0))
+	nw2 := rmnet.NewFromLibp2pHost(testData.Host2, rmnet.RetryParameters(0, 0, 0, 0))
 	providerNode := testnodes.NewTestRetrievalProviderNode()
 	pieceStore := tut.NewTestPieceStore()
 	expectedCIDs := tut.GenerateCids(3)
@@ -135,10 +140,12 @@ func requireSetupTestClientAndProvider(ctx context.Context, t *testing.T, payChA
 	}
 
 	paymentAddress := address.TestAddress2
-	dtTransport2 := dtgstransport.NewTransport(testData.Host2.ID(), testData.GraphSync2)
-	dt2, err := dtimpl.NewDataTransfer(testData.DTStore2, testData.DTNet2, dtTransport2, testData.DTStoredCounter2)
+
+	gs2 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host2), testData.Loader2, testData.Storer2)
+	dtTransport2 := dtgstransport.NewTransport(testData.Host2.ID(), gs2)
+	dt2, err := dtimpl.NewDataTransfer(testData.DTStore2, testData.DTTmpDir2, testData.DTNet2, dtTransport2, testData.DTStoredCounter2)
 	require.NoError(t, err)
-	err = dt2.Start(ctx)
+	testutil.StartAndWaitForReady(ctx, t, dt2)
 	require.NoError(t, err)
 	providerDs := namespace.Wrap(testData.Ds2, datastore.NewKey("/retrievals/provider"))
 	provider, err := retrievalimpl.NewProvider(paymentAddress, providerNode, nw2, pieceStore, testData.MultiStore2, dt2, providerDs)
@@ -180,6 +187,7 @@ func TestClientCanMakeDealWithProvider(t *testing.T) {
 		voucherAmts             []abi.TokenAmount
 		selector                ipld.Node
 		unsealPrice             abi.TokenAmount
+		zeroPricePerByte        bool
 		paramsV1, addFunds      bool
 		skipStores              bool
 		failsUnseal             bool
@@ -252,6 +260,11 @@ func TestClientCanMakeDealWithProvider(t *testing.T) {
 			filename:    "lorem.txt",
 			filesize:    19000,
 			voucherAmts: []abi.TokenAmount{abi.NewTokenAmount(10136000), abi.NewTokenAmount(9784000)},
+		},
+		{name: "multi-block file retrieval with zero price per byte succeeds",
+			filename:         "lorem.txt",
+			filesize:         19000,
+			zeroPricePerByte: true,
 		},
 		{name: "multi-block file retrieval succeeds with V1 params and AllSelector",
 			filename:    "lorem.txt",
@@ -330,6 +343,9 @@ func TestClientCanMakeDealWithProvider(t *testing.T) {
 				paymentIntervalIncrease = uint64(1000)
 			}
 			pricePerByte := abi.NewTokenAmount(1000)
+			if testCase.zeroPricePerByte {
+				pricePerByte = abi.NewTokenAmount(0)
+			}
 			unsealPrice := testCase.unsealPrice
 			if unsealPrice.Int == nil {
 				unsealPrice = big.Zero()
@@ -402,7 +418,7 @@ func TestClientCanMakeDealWithProvider(t *testing.T) {
 				require.NoError(t, providerNode.ExpectVoucher(clientPaymentChannel, expectedVoucher, proof, voucherAmt, voucherAmt, nil))
 			}
 
-			nw1 := rmnet.NewFromLibp2pHost(testData.Host1, rmnet.RetryParameters(0, 0, 0))
+			nw1 := rmnet.NewFromLibp2pHost(testData.Host1, rmnet.RetryParameters(0, 0, 0, 0))
 			createdChan, newLaneAddr, createdVoucher, clientNode, client, err := setupClient(bgCtx, t, clientPaymentChannel, expectedVoucher, nw1, testData, testCase.addFunds, testCase.channelAvailableFunds)
 			require.NoError(t, err)
 			tut.StartAndWaitForReady(ctx, t, client)
@@ -498,13 +514,16 @@ CurrentInterval: %d
 			} else if testCase.cancelled {
 				assert.Equal(t, retrievalmarket.DealStatusCancelled, clientDealState.Status)
 			} else {
-				assert.Equal(t, clientDealState.PaymentInfo.Lane, expectedVoucher.Lane)
-				require.NotNil(t, createdChan)
-				require.Equal(t, expectedTotal, createdChan.amt)
-				require.Equal(t, clientPaymentChannel, *newLaneAddr)
-				// verify that the voucher was saved/seen by the client with correct values
-				require.NotNil(t, createdVoucher)
-				tut.TestVoucherEquality(t, createdVoucher, expectedVoucher)
+				if !testCase.zeroPricePerByte {
+					assert.Equal(t, clientDealState.PaymentInfo.Lane, expectedVoucher.Lane)
+					require.NotNil(t, createdChan)
+					require.Equal(t, expectedTotal, createdChan.amt)
+					require.Equal(t, clientPaymentChannel, *newLaneAddr)
+
+					// verify that the voucher was saved/seen by the client with correct values
+					require.NotNil(t, createdVoucher)
+					tut.TestVoucherEquality(t, createdVoucher, expectedVoucher)
+				}
 				assert.Equal(t, retrievalmarket.DealStatusCompleted, clientDealState.Status)
 			}
 			ctx, cancel = context.WithTimeout(bgCtx, 5*time.Second)
@@ -518,11 +537,11 @@ CurrentInterval: %d
 			}
 
 			if testCase.failsUnseal {
-				require.Equal(t, retrievalmarket.DealStatusErrored, providerDealState.Status)
+				tut.AssertRetrievalDealState(t, retrievalmarket.DealStatusErrored, providerDealState.Status)
 			} else if testCase.cancelled {
-				require.Equal(t, retrievalmarket.DealStatusCancelled, providerDealState.Status)
+				tut.AssertRetrievalDealState(t, retrievalmarket.DealStatusCancelled, providerDealState.Status)
 			} else {
-				require.Equal(t, retrievalmarket.DealStatusCompleted, providerDealState.Status)
+				tut.AssertRetrievalDealState(t, retrievalmarket.DealStatusCompleted, providerDealState.Status)
 			}
 			// TODO this is terrible, but it's temporary until the test harness refactor
 			// in the resuming retrieval deals branch is done
@@ -589,10 +608,12 @@ func setupClient(
 		IntegrationTest:        true,
 		ChannelAvailableFunds:  channelAvailableFunds,
 	})
-	dtTransport1 := dtgstransport.NewTransport(testData.Host1.ID(), testData.GraphSync1)
-	dt1, err := dtimpl.NewDataTransfer(testData.DTStore1, testData.DTNet1, dtTransport1, testData.DTStoredCounter1)
+
+	gs1 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host1), testData.Loader1, testData.Storer1)
+	dtTransport1 := dtgstransport.NewTransport(testData.Host1.ID(), gs1)
+	dt1, err := dtimpl.NewDataTransfer(testData.DTStore1, testData.DTTmpDir1, testData.DTNet1, dtTransport1, testData.DTStoredCounter1)
 	require.NoError(t, err)
-	err = dt1.Start(ctx)
+	testutil.StartAndWaitForReady(ctx, t, dt1)
 	require.NoError(t, err)
 	clientDs := namespace.Wrap(testData.Ds1, datastore.NewKey("/retrievals/client"))
 
@@ -612,7 +633,7 @@ func setupProvider(
 	decider retrievalimpl.DealDecider,
 	disableNewDeals bool,
 ) retrievalmarket.RetrievalProvider {
-	nw2 := rmnet.NewFromLibp2pHost(testData.Host2, rmnet.RetryParameters(0, 0, 0))
+	nw2 := rmnet.NewFromLibp2pHost(testData.Host2, rmnet.RetryParameters(0, 0, 0, 0))
 	pieceStore := tut.NewTestPieceStore()
 	expectedPiece := tut.GenerateCids(1)[0]
 	cidInfo := piecestore.CIDInfo{
@@ -624,10 +645,12 @@ func setupProvider(
 	}
 	pieceStore.ExpectCID(payloadCID, cidInfo)
 	pieceStore.ExpectPiece(expectedPiece, pieceInfo)
-	dtTransport2 := dtgstransport.NewTransport(testData.Host2.ID(), testData.GraphSync2)
-	dt2, err := dtimpl.NewDataTransfer(testData.DTStore2, testData.DTNet2, dtTransport2, testData.DTStoredCounter2)
+
+	gs2 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host2), testData.Loader2, testData.Storer2)
+	dtTransport2 := dtgstransport.NewTransport(testData.Host2.ID(), gs2)
+	dt2, err := dtimpl.NewDataTransfer(testData.DTStore2, testData.DTTmpDir2, testData.DTNet2, dtTransport2, testData.DTStoredCounter2)
 	require.NoError(t, err)
-	err = dt2.Start(ctx)
+	testutil.StartAndWaitForReady(ctx, t, dt2)
 	require.NoError(t, err)
 	providerDs := namespace.Wrap(testData.Ds2, datastore.NewKey("/retrievals/provider"))
 

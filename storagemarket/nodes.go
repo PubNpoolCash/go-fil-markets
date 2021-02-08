@@ -16,6 +16,11 @@ import (
 	"github.com/filecoin-project/go-fil-markets/shared"
 )
 
+// DealSectorPreCommittedCallback is a callback that runs when a sector is pre-committed
+// sectorNumber: the number of the sector that the deal is in
+// isActive: the deal is already active
+type DealSectorPreCommittedCallback func(sectorNumber abi.SectorNumber, isActive bool, err error)
+
 // DealSectorCommittedCallback is a callback that runs when a sector is committed
 type DealSectorCommittedCallback func(err error)
 
@@ -34,10 +39,11 @@ type StorageCommon interface {
 	// Adds funds with the StorageMinerActor for a storage participant.  Used by both providers and clients.
 	AddFunds(ctx context.Context, addr address.Address, amount abi.TokenAmount) (cid.Cid, error)
 
-	// EnsureFunds ensures that a storage market participant has a certain amount of available funds
-	// If additional funds are needed, they will be sent from the 'wallet' address, and a cid for the
-	// corresponding chain message is returned
-	EnsureFunds(ctx context.Context, addr, wallet address.Address, amount abi.TokenAmount, tok shared.TipSetToken) (cid.Cid, error)
+	// ReserveFunds reserves the given amount of funds is ensures it is available for the deal
+	ReserveFunds(ctx context.Context, wallet, addr address.Address, amt abi.TokenAmount) (cid.Cid, error)
+
+	// ReleaseFunds releases funds reserved with ReserveFunds
+	ReleaseFunds(ctx context.Context, addr address.Address, amt abi.TokenAmount) error
 
 	// GetBalance returns locked/unlocked for a storage participant.  Used by both providers and clients.
 	GetBalance(ctx context.Context, addr address.Address, tok shared.TipSetToken) (Balance, error)
@@ -54,8 +60,11 @@ type StorageCommon interface {
 	// DealProviderCollateralBounds returns the min and max collateral a storage provider can issue.
 	DealProviderCollateralBounds(ctx context.Context, size abi.PaddedPieceSize, isVerified bool) (abi.TokenAmount, abi.TokenAmount, error)
 
+	// OnDealSectorPreCommitted waits for a deal's sector to be pre-committed
+	OnDealSectorPreCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, proposal market.DealProposal, publishCid *cid.Cid, cb DealSectorPreCommittedCallback) error
+
 	// OnDealSectorCommitted waits for a deal's sector to be sealed and proved, indicating the deal is active
-	OnDealSectorCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, cb DealSectorCommittedCallback) error
+	OnDealSectorCommitted(ctx context.Context, provider address.Address, dealID abi.DealID, sectorNumber abi.SectorNumber, proposal market.DealProposal, publishCid *cid.Cid, cb DealSectorCommittedCallback) error
 
 	// OnDealExpiredOrSlashed registers callbacks to be called when the deal expires or is slashed
 	OnDealExpiredOrSlashed(ctx context.Context, dealID abi.DealID, onDealExpired DealExpiredCallback, onDealSlashed DealSlashedCallback) error
@@ -68,12 +77,22 @@ type PackingResult struct {
 	Size         abi.PaddedPieceSize
 }
 
+// PublishDealsWaitResult is the result of a call to wait for publish deals to
+// appear on chain
+type PublishDealsWaitResult struct {
+	DealID   abi.DealID
+	FinalCid cid.Cid
+}
+
 // StorageProviderNode are node dependencies for a StorageProvider
 type StorageProviderNode interface {
 	StorageCommon
 
 	// PublishDeals publishes a deal on chain, returns the message cid, but does not wait for message to appear
 	PublishDeals(ctx context.Context, deal MinerDeal) (cid.Cid, error)
+
+	// WaitForPublishDeals waits for a deal publish message to land on chain.
+	WaitForPublishDeals(ctx context.Context, mcid cid.Cid, proposal market.DealProposal) (*PublishDealsWaitResult, error)
 
 	// OnDealComplete is called when a deal is complete and on chain, and data has been transferred and is ready to be added to a sector
 	OnDealComplete(ctx context.Context, deal MinerDeal, pieceSize abi.UnpaddedPieceSize, pieceReader io.Reader) (*PackingResult, error)
@@ -86,6 +105,9 @@ type StorageProviderNode interface {
 
 	// GetDataCap gets the current data cap for addr
 	GetDataCap(ctx context.Context, addr address.Address, tok shared.TipSetToken) (*verifreg.DataCap, error)
+
+	// GetProofType gets the current seal proof type for the given miner.
+	GetProofType(ctx context.Context, addr address.Address, tok shared.TipSetToken) (abi.RegisteredSealProof, error)
 }
 
 // StorageClientNode are node dependencies for a StorageClient

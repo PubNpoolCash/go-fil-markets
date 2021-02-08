@@ -3,6 +3,7 @@ package storageimpl
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/ipfs/go-cid"
 	"github.com/ipld/go-ipld-prime"
@@ -15,7 +16,6 @@ import (
 	"github.com/filecoin-project/go-fil-markets/filestore"
 	"github.com/filecoin-project/go-fil-markets/piecestore"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/providerstates"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/providerutils"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/network"
@@ -49,12 +49,20 @@ func (p *providerDealEnvironment) DeleteStore(storeID multistore.StoreID) error 
 	return p.p.multiStore.Delete(storeID)
 }
 
-func (p *providerDealEnvironment) GeneratePieceCommitmentToFile(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (cid.Cid, filestore.Path, filestore.Path, error) {
-	if p.p.universalRetrievalEnabled {
-		return providerutils.GeneratePieceCommitmentWithMetadata(p.p.fs, p.p.pio.GeneratePieceCommitmentToFile, p.p.proofType, payloadCid, selector, storeID)
+func (p *providerDealEnvironment) GeneratePieceCommitment(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (cid.Cid, filestore.Path, error) {
+	proofType, err := p.p.spn.GetProofType(context.TODO(), p.p.actor, nil)
+	if err != nil {
+		return cid.Undef, "", err
 	}
-	pieceCid, piecePath, _, err := p.p.pio.GeneratePieceCommitmentToFile(p.p.proofType, payloadCid, selector, storeID)
-	return pieceCid, piecePath, filestore.Path(""), err
+	if p.p.universalRetrievalEnabled {
+		return providerutils.GeneratePieceCommitmentWithMetadata(p.p.fs, p.p.pio.GeneratePieceCommitment, proofType, payloadCid, selector, storeID)
+	}
+	pieceCid, _, err := p.p.pio.GeneratePieceCommitment(proofType, payloadCid, selector, storeID)
+	return pieceCid, filestore.Path(""), err
+}
+
+func (p *providerDealEnvironment) GeneratePieceReader(storeID *multistore.StoreID, payloadCid cid.Cid, selector ipld.Node) (io.ReadCloser, uint64, error, <-chan error) {
+	return p.p.pio.GeneratePieceReader(payloadCid, selector, storeID)
 }
 
 func (p *providerDealEnvironment) FileStore() filestore.FileStore {
@@ -100,10 +108,6 @@ func (p *providerDealEnvironment) RunCustomDecisionLogic(ctx context.Context, de
 	return p.p.customDealDeciderFunc(ctx, deal)
 }
 
-func (p *providerDealEnvironment) DealFunds() funds.DealFunds {
-	return p.p.dealFunds
-}
-
 func (p *providerDealEnvironment) TagPeer(id peer.ID, s string) {
 	p.p.net.TagPeer(id, s)
 }
@@ -119,8 +123,14 @@ type providerStoreGetter struct {
 }
 
 func (psg *providerStoreGetter) Get(proposalCid cid.Cid) (*multistore.Store, error) {
+	// Wait for the provider to be ready
+	err := awaitProviderReady(psg.p)
+	if err != nil {
+		return nil, err
+	}
+
 	var deal storagemarket.MinerDeal
-	err := psg.p.deals.Get(proposalCid).Get(&deal)
+	err = psg.p.deals.Get(proposalCid).Get(&deal)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +145,23 @@ type providerPushDeals struct {
 }
 
 func (ppd *providerPushDeals) Get(proposalCid cid.Cid) (storagemarket.MinerDeal, error) {
+	// Wait for the provider to be ready
 	var deal storagemarket.MinerDeal
-	err := ppd.p.deals.GetSync(context.TODO(), proposalCid, &deal)
+	err := awaitProviderReady(ppd.p)
+	if err != nil {
+		return deal, err
+	}
+
+	err = ppd.p.deals.GetSync(context.TODO(), proposalCid, &deal)
 	return deal, err
+}
+
+// awaitProviderReady waits for the provider to startup
+func awaitProviderReady(p *Provider) error {
+	err := p.AwaitReady()
+	if err != nil {
+		return xerrors.Errorf("could not get deal with proposal CID %s: error waiting for provider startup: %w")
+	}
+
+	return nil
 }

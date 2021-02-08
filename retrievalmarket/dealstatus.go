@@ -34,7 +34,7 @@ const (
 	DealStatusFundsNeededUnseal
 
 	// DealStatusFailing indicates something went wrong during a retrieval,
-	// and we are cleaning up before termianting with an error
+	// and we are cleaning up before terminating with an error
 	DealStatusFailing
 
 	// DealStatusRejected indicates the provider rejected a client's deal proposal
@@ -45,10 +45,10 @@ const (
 	// continue processing the deal
 	DealStatusFundsNeeded
 
-	// DealStatusSendFunds indicats the client is now going to send funds because we reached the threshold of the last payment
+	// DealStatusSendFunds indicates the client is now going to send funds because we reached the threshold of the last payment
 	DealStatusSendFunds
 
-	// DealStatusSendFundsLastPayment indicats the client is now going to send final funds because
+	// DealStatusSendFundsLastPayment indicates the client is now going to send final funds because
 	// we reached the threshold of the final payment
 	DealStatusSendFundsLastPayment
 
@@ -106,6 +106,13 @@ const (
 
 	// DealStatusWaitForAcceptanceLegacy means we're waiting to hear the results on the legacy protocol
 	DealStatusWaitForAcceptanceLegacy
+
+	// DealStatusClientWaitingForLastBlocks means that the provider has told
+	// the client that all blocks were sent for the deal, and the client is
+	// waiting for the last blocks to arrive. This should only happen when
+	// the deal price per byte is zero (if it's not zero the provider asks
+	// for final payment after sending the last blocks).
+	DealStatusClientWaitingForLastBlocks
 )
 
 // DealStatuses maps deal status to a human readable representation
@@ -139,4 +146,5 @@ var DealStatuses = map[DealStatus]string{
 	DealStatusCancelled:                    "DealStatusCancelled",
 	DealStatusRetryLegacy:                  "DealStatusRetryLegacy",
 	DealStatusWaitForAcceptanceLegacy:      "DealStatusWaitForAcceptanceLegacy",
+	DealStatusClientWaitingForLastBlocks:   "DealStatusWaitingForLastBlocks",
 }

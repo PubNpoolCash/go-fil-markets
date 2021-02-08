@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,9 +16,6 @@ import (
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
 	dss "github.com/ipfs/go-datastore/sync"
-	"github.com/ipfs/go-graphsync"
-	graphsyncimpl "github.com/ipfs/go-graphsync/impl"
-	"github.com/ipfs/go-graphsync/network"
 	bstore "github.com/ipfs/go-ipfs-blockstore"
 	chunk "github.com/ipfs/go-ipfs-chunker"
 	offline "github.com/ipfs/go-ipfs-exchange-offline"
@@ -53,12 +51,12 @@ type Libp2pTestData struct {
 	MultiStore2             *multistore.MultiStore
 	DagService1             ipldformat.DAGService
 	DagService2             ipldformat.DAGService
-	GraphSync1              graphsync.GraphExchange
-	GraphSync2              graphsync.GraphExchange
 	DTNet1                  dtnet.DataTransferNetwork
 	DTNet2                  dtnet.DataTransferNetwork
 	DTStore1                datastore.Batching
 	DTStore2                datastore.Batching
+	DTTmpDir1               string
+	DTTmpDir2               string
 	Loader1                 ipld.Loader
 	Loader2                 ipld.Loader
 	Storer1                 ipld.Storer
@@ -66,6 +64,8 @@ type Libp2pTestData struct {
 	Host1                   host.Host
 	Host2                   host.Host
 	OrigBytes               []byte
+
+	MockNet mocknet.Mocknet
 }
 
 func NewLibp2pTestData(ctx context.Context, t *testing.T) *Libp2pTestData {
@@ -146,14 +146,22 @@ func NewLibp2pTestData(ctx context.Context, t *testing.T) *Libp2pTestData {
 	err = mn.LinkAll()
 	require.NoError(t, err)
 
-	testData.GraphSync1 = graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host1), testData.Loader1, testData.Storer1)
-	testData.GraphSync2 = graphsyncimpl.New(ctx, network.NewFromLibp2pHost(testData.Host2), testData.Loader2, testData.Storer2)
-
 	testData.DTNet1 = dtnet.NewFromLibp2pHost(testData.Host1)
 	testData.DTNet2 = dtnet.NewFromLibp2pHost(testData.Host2)
 
 	testData.DTStore1 = namespace.Wrap(testData.Ds1, datastore.NewKey("DataTransfer1"))
 	testData.DTStore2 = namespace.Wrap(testData.Ds1, datastore.NewKey("DataTransfer2"))
+
+	testData.DTTmpDir1, err = ioutil.TempDir("", "dt-tmp-1")
+	require.NoError(t, err)
+	testData.DTTmpDir2, err = ioutil.TempDir("", "dt-tmp-2")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(testData.DTTmpDir1)
+		_ = os.RemoveAll(testData.DTTmpDir2)
+	})
+
+	testData.MockNet = mn
 
 	return testData
 }

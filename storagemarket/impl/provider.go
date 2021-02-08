@@ -12,24 +12,25 @@ import (
 
 	"github.com/filecoin-project/go-address"
 	cborutil "github.com/filecoin-project/go-cbor-util"
+	"github.com/filecoin-project/go-commp-utils/ffiwrapper"
+	"github.com/filecoin-project/go-commp-utils/pieceio"
+	"github.com/filecoin-project/go-commp-utils/pieceio/cario"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
 	versioning "github.com/filecoin-project/go-ds-versioning/pkg"
 	versionedfsm "github.com/filecoin-project/go-ds-versioning/pkg/fsm"
 	"github.com/filecoin-project/go-multistore"
+	"github.com/filecoin-project/go-padreader"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/crypto"
 	"github.com/filecoin-project/go-state-types/exitcode"
 	"github.com/filecoin-project/go-statemachine/fsm"
 
 	"github.com/filecoin-project/go-fil-markets/filestore"
-	"github.com/filecoin-project/go-fil-markets/pieceio"
-	"github.com/filecoin-project/go-fil-markets/pieceio/cario"
 	"github.com/filecoin-project/go-fil-markets/piecestore"
 	"github.com/filecoin-project/go-fil-markets/shared"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/connmanager"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/dtutils"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/providerstates"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/providerutils"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/requestvalidation"
@@ -50,22 +51,19 @@ type StoredAsk interface {
 type Provider struct {
 	net network.StorageMarketNetwork
 
-	proofType abi.RegisteredSealProof
-
 	spn                       storagemarket.StorageProviderNode
 	fs                        filestore.FileStore
 	multiStore                *multistore.MultiStore
-	pio                       pieceio.PieceIOWithStore
+	pio                       pieceio.PieceIO
 	pieceStore                piecestore.PieceStore
 	conns                     *connmanager.ConnManager
 	storedAsk                 StoredAsk
-	dealFunds                 funds.DealFunds
 	actor                     address.Address
 	dataTransfer              datatransfer.Manager
 	universalRetrievalEnabled bool
 	customDealDeciderFunc     DealDeciderFunc
 	pubSub                    *pubsub.PubSub
-	readySub                  *pubsub.PubSub
+	readyMgr                  *shared.ReadyManager
 
 	deals        fsm.Group
 	migrateDeals func(context.Context) error
@@ -109,17 +107,14 @@ func NewProvider(net network.StorageMarketNetwork,
 	dataTransfer datatransfer.Manager,
 	spn storagemarket.StorageProviderNode,
 	minerAddress address.Address,
-	rt abi.RegisteredSealProof,
 	storedAsk StoredAsk,
-	dealFunds funds.DealFunds,
 	options ...StorageProviderOption,
 ) (storagemarket.StorageProvider, error) {
 	carIO := cario.NewCarIO()
-	pio := pieceio.NewPieceIOWithStore(carIO, fs, nil, multiStore)
+	pio := pieceio.NewPieceIO(carIO, nil, multiStore)
 
 	h := &Provider{
 		net:          net,
-		proofType:    rt,
 		spn:          spn,
 		fs:           fs,
 		multiStore:   multiStore,
@@ -127,11 +122,10 @@ func NewProvider(net network.StorageMarketNetwork,
 		pieceStore:   pieceStore,
 		conns:        connmanager.NewConnManager(),
 		storedAsk:    storedAsk,
-		dealFunds:    dealFunds,
 		actor:        minerAddress,
 		dataTransfer: dataTransfer,
 		pubSub:       pubsub.New(providerDispatcher),
-		readySub:     pubsub.New(shared.ReadyDispatcher),
+		readyMgr:     shared.NewReadyManager(),
 	}
 	storageMigrations, err := migrations.ProviderMigrations.Build()
 	if err != nil {
@@ -184,7 +178,11 @@ func (p *Provider) Start(ctx context.Context) error {
 
 // OnReady registers a listener for when the provider has finished starting up
 func (p *Provider) OnReady(ready shared.ReadyFunc) {
-	p.readySub.Subscribe(ready)
+	p.readyMgr.OnReady(ready)
+}
+
+func (p *Provider) AwaitReady() error {
+	return p.readyMgr.AwaitReady()
 }
 
 /*
@@ -231,6 +229,14 @@ func (p *Provider) receiveDeal(s network.StorageDealStream) error {
 		return err
 	}
 
+	// Check if we are already tracking this deal
+	var md storagemarket.MinerDeal
+	if err := p.deals.Get(proposalNd.Cid()).Get(&md); err == nil {
+		// We are already tracking this deal, for some reason it was re-proposed, perhaps because of a client restart
+		// this is ok, just send a response back.
+		return p.resendProposalResponse(s, &md)
+	}
+
 	var storeIDForDeal *multistore.StoreID
 	if proposal.Piece.TransferType != storagemarket.TTManual {
 		nextStoreID := p.multiStore.Next()
@@ -266,6 +272,7 @@ func (p *Provider) receiveDeal(s network.StorageDealStream) error {
 
 // Stop terminates processing of deals on a StorageProvider
 func (p *Provider) Stop() error {
+	p.readyMgr.Stop()
 	p.unsubDataTransfer()
 	err := p.deals.Stop(context.TODO())
 	if err != nil {
@@ -309,10 +316,16 @@ func (p *Provider) ImportDataForDeal(ctx context.Context, propCid cid.Cid, data 
 		return xerrors.Errorf("failed to seek through temp imported file: %w", err)
 	}
 
-	pieceCid, _, err := pieceio.GeneratePieceCommitment(p.proofType, tempfi, pieceSize)
+	proofType, err := p.spn.GetProofType(ctx, p.actor, nil)
 	if err != nil {
 		cleanup()
-		return xerrors.Errorf("failed to generate commP")
+		return xerrors.Errorf("failed to determine proof type: %w", err)
+	}
+
+	pieceCid, err := generatePieceCommitment(proofType, tempfi, pieceSize)
+	if err != nil {
+		cleanup()
+		return xerrors.Errorf("failed to generate commP: %w", err)
 	}
 
 	// Verify CommP matches
@@ -322,7 +335,15 @@ func (p *Provider) ImportDataForDeal(ctx context.Context, propCid cid.Cid, data 
 	}
 
 	return p.deals.Send(propCid, storagemarket.ProviderEventVerifiedData, tempfi.Path(), filestore.Path(""))
+}
 
+func generatePieceCommitment(rt abi.RegisteredSealProof, rd io.Reader, pieceSize uint64) (cid.Cid, error) {
+	paddedReader, paddedSize := padreader.New(rd, pieceSize)
+	commitment, err := ffiwrapper.GeneratePieceCIDFromFile(rt, paddedReader, paddedSize)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return commitment, nil
 }
 
 // GetAsk returns the storage miner's ask, or nil if one does not exist.
@@ -539,7 +560,7 @@ func (p *Provider) dispatch(eventName fsm.EventName, deal fsm.StateType) {
 
 func (p *Provider) start(ctx context.Context) error {
 	err := p.migrateDeals(ctx)
-	publishErr := p.readySub.Publish(err)
+	publishErr := p.readyMgr.FireReady(err)
 	if publishErr != nil {
 		log.Warnf("Publish storage provider ready event: %s", err.Error())
 	}
@@ -579,6 +600,22 @@ func (p *Provider) sign(ctx context.Context, data interface{}) (*crypto.Signatur
 	}
 
 	return providerutils.SignMinerData(ctx, data, p.actor, tok, p.spn.GetMinerWorkerAddress, p.spn.SignBytes)
+}
+
+func (p *Provider) resendProposalResponse(s network.StorageDealStream, md *storagemarket.MinerDeal) error {
+	resp := &network.Response{State: md.State, Message: md.Message, Proposal: md.ProposalCid}
+	sig, err := p.sign(context.TODO(), resp)
+	if err != nil {
+		return xerrors.Errorf("failed to sign response message: %w", err)
+	}
+
+	err = s.WriteDealResponse(network.SignedResponse{Response: *resp, Signature: sig}, p.sign)
+
+	if closeErr := s.Close(); closeErr != nil {
+		log.Warnf("closing connection: %v", err)
+	}
+
+	return err
 }
 
 func newProviderStateMachine(ds datastore.Batching, env fsm.Environment, notifier fsm.Notifier, storageMigrations versioning.VersionedMigrationList, target versioning.VersionKey) (fsm.Group, func(context.Context) error, error) {

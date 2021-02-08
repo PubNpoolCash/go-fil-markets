@@ -54,8 +54,8 @@ type StoredAsk struct {
 // NewStoredAsk returns a new instance of StoredAsk
 // It will initialize a new SignedStorageAsk on disk if one is not set
 // Otherwise it loads the current SignedStorageAsk from disk
-func NewStoredAsk(ds datastore.Batching, dsKey datastore.Key, spn storagemarket.StorageProviderNode, actor address.Address) (*StoredAsk, error) {
-
+func NewStoredAsk(ds datastore.Batching, dsKey datastore.Key, spn storagemarket.StorageProviderNode, actor address.Address,
+	opts ...storagemarket.StorageAskOption) (*StoredAsk, error) {
 	s := &StoredAsk{
 		spn:   spn,
 		actor: actor,
@@ -87,7 +87,7 @@ func NewStoredAsk(ds datastore.Batching, dsKey datastore.Key, spn storagemarket.
 	if s.ask == nil {
 		// TODO: we should be fine with this state, and just say it means 'not actively accepting deals'
 		// for now... lets just set a price
-		if err := s.SetAsk(DefaultPrice, DefaultVerifiedPrice, DefaultDuration); err != nil {
+		if err := s.SetAsk(DefaultPrice, DefaultVerifiedPrice, DefaultDuration, opts...); err != nil {
 			return nil, xerrors.Errorf("failed setting a default price: %w", err)
 		}
 	}
@@ -95,14 +95,19 @@ func NewStoredAsk(ds datastore.Batching, dsKey datastore.Key, spn storagemarket.
 }
 
 // SetAsk configures the storage miner's ask with the provided prices (for unverified and verified deals),
-// duration, and options. Any previously-existing ask is replaced.
+// duration, and options. Any previously-existing ask is replaced.  If no options are passed to configure
+// MinPieceSize and MaxPieceSize, the previous ask's values will be used, if available.
 // It also increments the sequence number on the ask
 func (s *StoredAsk) SetAsk(price abi.TokenAmount, verifiedPrice abi.TokenAmount, duration abi.ChainEpoch, options ...storagemarket.StorageAskOption) error {
 	s.askLk.Lock()
 	defer s.askLk.Unlock()
 	var seqno uint64
+	minPieceSize := DefaultMinPieceSize
+	maxPieceSize := DefaultMaxPieceSize
 	if s.ask != nil {
 		seqno = s.ask.Ask.SeqNo + 1
+		minPieceSize = s.ask.Ask.MinPieceSize
+		maxPieceSize = s.ask.Ask.MaxPieceSize
 	}
 
 	ctx := context.TODO()
@@ -118,8 +123,8 @@ func (s *StoredAsk) SetAsk(price abi.TokenAmount, verifiedPrice abi.TokenAmount,
 		Expiry:        height + duration,
 		Miner:         s.actor,
 		SeqNo:         seqno,
-		MinPieceSize:  DefaultMinPieceSize,
-		MaxPieceSize:  DefaultMaxPieceSize,
+		MinPieceSize:  minPieceSize,
+		MaxPieceSize:  maxPieceSize,
 	}
 
 	for _, option := range options {

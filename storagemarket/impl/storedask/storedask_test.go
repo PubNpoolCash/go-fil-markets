@@ -56,6 +56,7 @@ func TestStoredAsk(t *testing.T) {
 		require.Equal(t, ask.Ask.VerifiedPrice, testVerifiedPrice)
 		require.Equal(t, ask.Ask.Expiry-ask.Ask.Timestamp, testDuration)
 	})
+
 	t.Run("node errors", func(t *testing.T) {
 		spnStateIDErr := &testnodes.FakeProviderNode{
 			FakeCommonNode: testnodes.FakeCommonNode{
@@ -94,6 +95,45 @@ func TestStoredAsk(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestPieceSizeLimits(t *testing.T) {
+	// create ask with options
+	ds := dss.MutexWrap(datastore.NewMapDatastore())
+	spn := &testnodes.FakeProviderNode{
+		FakeCommonNode: testnodes.FakeCommonNode{
+			SMState: testnodes.NewStorageMarketState(),
+		},
+	}
+	actor := address.TestAddress2
+	min := abi.PaddedPieceSize(1024)
+	max := abi.PaddedPieceSize(4096)
+	sa, err := storedask.NewStoredAsk(ds, datastore.NewKey("latest-ask"), spn, actor, storagemarket.MinPieceSize(min), storagemarket.MaxPieceSize(max))
+	require.NoError(t, err)
+	ask := sa.GetAsk()
+	require.EqualValues(t, min, ask.Ask.MinPieceSize)
+	require.EqualValues(t, max, ask.Ask.MaxPieceSize)
+
+	// SetAsk should not clobber previously-set options
+	require.NoError(t, sa.SetAsk(ask.Ask.Price, ask.Ask.VerifiedPrice, ask.Ask.Expiry))
+	require.NoError(t, err)
+	ask = sa.GetAsk()
+	require.EqualValues(t, min, ask.Ask.MinPieceSize)
+	require.EqualValues(t, max, ask.Ask.MaxPieceSize)
+
+	// now change the size limits via set ask
+	testPrice := abi.NewTokenAmount(1000000000)
+	testVerifiedPrice := abi.NewTokenAmount(100000000)
+	testDuration := abi.ChainEpoch(200)
+	newMin := abi.PaddedPieceSize(150)
+	newMax := abi.PaddedPieceSize(12345)
+	require.NoError(t, sa.SetAsk(testPrice, testVerifiedPrice, testDuration, storagemarket.MinPieceSize(newMin), storagemarket.MaxPieceSize(newMax)))
+
+	// call get
+	ask = sa.GetAsk()
+	require.EqualValues(t, newMin, ask.Ask.MinPieceSize)
+	require.EqualValues(t, newMax, ask.Ask.MaxPieceSize)
+}
+
 func TestMigrations(t *testing.T) {
 	ctx := context.Background()
 	ds := dss.MutexWrap(datastore.NewMapDatastore())

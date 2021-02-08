@@ -5,18 +5,24 @@ import (
 	"context"
 	"io/ioutil"
 	"math/rand"
+	"os"
 	"testing"
 
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
+	graphsyncimpl "github.com/ipfs/go-graphsync/impl"
+	"github.com/ipfs/go-graphsync/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-address"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
 	dtimpl "github.com/filecoin-project/go-data-transfer/impl"
+	network2 "github.com/filecoin-project/go-data-transfer/network"
+	"github.com/filecoin-project/go-data-transfer/testutil"
 	dtgstransport "github.com/filecoin-project/go-data-transfer/transport/graphsync"
 	"github.com/filecoin-project/go-state-types/abi"
+	"github.com/filecoin-project/go-storedcounter"
 	"github.com/filecoin-project/specs-actors/actors/builtin/market"
 
 	discoveryimpl "github.com/filecoin-project/go-fil-markets/discovery/impl"
@@ -25,45 +31,83 @@ import (
 	piecestoreimpl "github.com/filecoin-project/go-fil-markets/piecestore/impl"
 	"github.com/filecoin-project/go-fil-markets/shared_testutil"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/storedask"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/testnodes"
 )
 
 // StorageDependencies are the dependencies required to initialize a storage client/provider
 type StorageDependencies struct {
-	Ctx                 context.Context
-	Epoch               abi.ChainEpoch
-	ProviderAddr        address.Address
-	ClientAddr          address.Address
-	ClientNode          *testnodes.FakeClientNode
-	ProviderNode        *testnodes.FakeProviderNode
-	SMState             *testnodes.StorageMarketState
-	TempFilePath        string
-	ProviderInfo        storagemarket.StorageProviderInfo
-	TestData            *shared_testutil.Libp2pTestData
-	PieceStore          piecestore.PieceStore
-	DTClient            datatransfer.Manager
-	DTProvider          datatransfer.Manager
-	PeerResolver        *discoveryimpl.Local
-	DelayFakeCommonNode testnodes.DelayFakeCommonNode
-	Fs                  filestore.FileStore
-	ClientDealFunds     funds.DealFunds
-	StoredAsk           *storedask.StoredAsk
-	ProviderDealFunds   funds.DealFunds
+	Ctx                               context.Context
+	Epoch                             abi.ChainEpoch
+	ProviderAddr                      address.Address
+	ClientAddr                        address.Address
+	ClientNode                        *testnodes.FakeClientNode
+	ProviderNode                      *testnodes.FakeProviderNode
+	SMState                           *testnodes.StorageMarketState
+	TempFilePath                      string
+	ProviderInfo                      storagemarket.StorageProviderInfo
+	TestData                          *shared_testutil.Libp2pTestData
+	PieceStore                        piecestore.PieceStore
+	DTClient                          datatransfer.Manager
+	DTProvider                        datatransfer.Manager
+	PeerResolver                      *discoveryimpl.Local
+	ClientDelayFakeCommonNode         testnodes.DelayFakeCommonNode
+	ProviderClientDelayFakeCommonNode testnodes.DelayFakeCommonNode
+	Fs                                filestore.FileStore
+	StoredAsk                         *storedask.StoredAsk
 }
 
-func NewDependenciesWithTestData(t *testing.T, ctx context.Context, td *shared_testutil.Libp2pTestData, smState *testnodes.StorageMarketState, tempPath string,
-	delayFakeEnvNode testnodes.DelayFakeCommonNode) *StorageDependencies {
+func NewDependenciesWithTestData(t *testing.T,
+	ctx context.Context,
+	td *shared_testutil.Libp2pTestData,
+	smState *testnodes.StorageMarketState,
+	tempPath string,
+	cd testnodes.DelayFakeCommonNode,
+	pd testnodes.DelayFakeCommonNode,
+) *StorageDependencies {
+	return NewDepGenerator().New(t, ctx, td, smState, tempPath, cd, pd)
+}
 
-	delayFakeEnvNode.OnDealSectorCommittedChan = make(chan struct{})
-	delayFakeEnvNode.OnDealExpiredOrSlashedChan = make(chan struct{})
+type NewDataTransfer func(ds datastore.Batching, cidListsDir string, dataTransferNetwork network2.DataTransferNetwork, transport datatransfer.Transport, storedCounter *storedcounter.StoredCounter) (datatransfer.Manager, error)
+
+func defaultNewDataTransfer(ds datastore.Batching, dir string, transferNetwork network2.DataTransferNetwork, transport datatransfer.Transport, counter *storedcounter.StoredCounter) (datatransfer.Manager, error) {
+	return dtimpl.NewDataTransfer(ds, dir, transferNetwork, transport, counter)
+}
+
+type DepGenerator struct {
+	ClientNewDataTransfer   NewDataTransfer
+	ProviderNewDataTransfer NewDataTransfer
+}
+
+func NewDepGenerator() *DepGenerator {
+	return &DepGenerator{
+		ClientNewDataTransfer:   defaultNewDataTransfer,
+		ProviderNewDataTransfer: defaultNewDataTransfer,
+	}
+}
+
+func (gen *DepGenerator) New(
+	t *testing.T,
+	ctx context.Context,
+	td *shared_testutil.Libp2pTestData,
+	smState *testnodes.StorageMarketState,
+	tempPath string,
+	cd testnodes.DelayFakeCommonNode,
+	pd testnodes.DelayFakeCommonNode,
+) *StorageDependencies {
+	cd.OnDealSectorCommittedChan = make(chan struct{})
+	cd.OnDealExpiredOrSlashedChan = make(chan struct{})
+
+	pd.OnDealSectorCommittedChan = make(chan struct{})
+	pd.OnDealExpiredOrSlashedChan = make(chan struct{})
 
 	epoch := abi.ChainEpoch(100)
 
 	clientNode := testnodes.FakeClientNode{
-		FakeCommonNode: testnodes.FakeCommonNode{SMState: smState,
-			DelayFakeCommonNode: delayFakeEnvNode},
+		FakeCommonNode: testnodes.FakeCommonNode{
+			SMState:             smState,
+			DealFunds:           shared_testutil.NewTestDealFunds(),
+			DelayFakeCommonNode: cd},
 		ClientAddr:         address.TestAddress,
 		ExpectedMinerInfos: []address.Address{address.TestAddress2},
 	}
@@ -79,6 +123,7 @@ func NewDependenciesWithTestData(t *testing.T, ctx context.Context, td *shared_t
 	if len(tempPath) == 0 {
 		tempPath, err = ioutil.TempDir("", "storagemarket_test")
 		assert.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(tempPath) })
 	}
 
 	ps, err := piecestoreimpl.NewPieceStore(td.Ds2)
@@ -87,8 +132,9 @@ func NewDependenciesWithTestData(t *testing.T, ctx context.Context, td *shared_t
 
 	providerNode := &testnodes.FakeProviderNode{
 		FakeCommonNode: testnodes.FakeCommonNode{
-			DelayFakeCommonNode:    delayFakeEnvNode,
+			DelayFakeCommonNode:    pd,
 			SMState:                smState,
+			DealFunds:              shared_testutil.NewTestDealFunds(),
 			WaitForMessageRetBytes: psdReturnBytes.Bytes(),
 		},
 		MinerAddr: providerAddr,
@@ -97,28 +143,25 @@ func NewDependenciesWithTestData(t *testing.T, ctx context.Context, td *shared_t
 	assert.NoError(t, err)
 
 	// create provider and client
-	dtTransport1 := dtgstransport.NewTransport(td.Host1.ID(), td.GraphSync1)
-	dt1, err := dtimpl.NewDataTransfer(td.DTStore1, td.DTNet1, dtTransport1, td.DTStoredCounter1)
+
+	gs1 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(td.Host1), td.Loader1, td.Storer1)
+	dtTransport1 := dtgstransport.NewTransport(td.Host1.ID(), gs1)
+	dt1, err := gen.ClientNewDataTransfer(td.DTStore1, td.DTTmpDir1, td.DTNet1, dtTransport1, td.DTStoredCounter1)
 	require.NoError(t, err)
-	err = dt1.Start(ctx)
-	require.NoError(t, err)
-	clientDealFunds, err := funds.NewDealFunds(td.Ds1, datastore.NewKey("storage/client/dealfunds"))
-	require.NoError(t, err)
+	testutil.StartAndWaitForReady(ctx, t, dt1)
 
 	discovery, err := discoveryimpl.NewLocal(namespace.Wrap(td.Ds1, datastore.NewKey("/deals/local")))
 	require.NoError(t, err)
 	shared_testutil.StartAndWaitForReady(ctx, t, discovery)
 
-	dtTransport2 := dtgstransport.NewTransport(td.Host2.ID(), td.GraphSync2)
-	dt2, err := dtimpl.NewDataTransfer(td.DTStore2, td.DTNet2, dtTransport2, td.DTStoredCounter2)
+	gs2 := graphsyncimpl.New(ctx, network.NewFromLibp2pHost(td.Host2), td.Loader2, td.Storer2)
+	dtTransport2 := dtgstransport.NewTransport(td.Host2.ID(), gs2)
+	dt2, err := gen.ProviderNewDataTransfer(td.DTStore2, td.DTTmpDir2, td.DTNet2, dtTransport2, td.DTStoredCounter2)
 	require.NoError(t, err)
-	err = dt2.Start(ctx)
-	require.NoError(t, err)
+	testutil.StartAndWaitForReady(ctx, t, dt2)
 
 	storedAskDs := namespace.Wrap(td.Ds2, datastore.NewKey("/storage/ask"))
 	storedAsk, err := storedask.NewStoredAsk(storedAskDs, datastore.NewKey("latest-ask"), providerNode, providerAddr)
-	assert.NoError(t, err)
-	providerDealFunds, err := funds.NewDealFunds(td.Ds2, datastore.NewKey("storage/provider/dealfunds"))
 	assert.NoError(t, err)
 
 	// Closely follows the MinerInfo struct in the spec
@@ -132,24 +175,23 @@ func NewDependenciesWithTestData(t *testing.T, ctx context.Context, td *shared_t
 
 	smState.Providers = map[address.Address]*storagemarket.StorageProviderInfo{providerAddr: &providerInfo}
 	return &StorageDependencies{
-		Ctx:                 ctx,
-		Epoch:               epoch,
-		ClientAddr:          clientNode.ClientAddr,
-		ProviderAddr:        providerAddr,
-		ClientNode:          &clientNode,
-		ProviderNode:        providerNode,
-		ProviderInfo:        providerInfo,
-		TestData:            td,
-		SMState:             smState,
-		TempFilePath:        tempPath,
-		DelayFakeCommonNode: delayFakeEnvNode,
-		DTClient:            dt1,
-		DTProvider:          dt2,
-		PeerResolver:        discovery,
-		PieceStore:          ps,
-		Fs:                  fs,
-		ClientDealFunds:     clientDealFunds,
-		StoredAsk:           storedAsk,
-		ProviderDealFunds:   providerDealFunds,
+		Ctx:                               ctx,
+		Epoch:                             epoch,
+		ClientAddr:                        clientNode.ClientAddr,
+		ProviderAddr:                      providerAddr,
+		ClientNode:                        &clientNode,
+		ProviderNode:                      providerNode,
+		ProviderInfo:                      providerInfo,
+		TestData:                          td,
+		SMState:                           smState,
+		TempFilePath:                      tempPath,
+		ClientDelayFakeCommonNode:         cd,
+		ProviderClientDelayFakeCommonNode: pd,
+		DTClient:                          dt1,
+		DTProvider:                        dt2,
+		PeerResolver:                      discovery,
+		PieceStore:                        ps,
+		Fs:                                fs,
+		StoredAsk:                         storedAsk,
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/filecoin-project/go-multistore"
 
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/network"
 )
 
@@ -32,9 +31,14 @@ func (c *clientDealEnvironment) Node() storagemarket.StorageClientNode {
 	return c.c.node
 }
 
-func (c *clientDealEnvironment) StartDataTransfer(ctx context.Context, to peer.ID, voucher datatransfer.Voucher, baseCid cid.Cid, selector ipld.Node) error {
-	_, err := c.c.dataTransfer.OpenPushDataChannel(ctx, to, voucher, baseCid, selector)
-	return err
+func (c *clientDealEnvironment) StartDataTransfer(ctx context.Context, to peer.ID, voucher datatransfer.Voucher, baseCid cid.Cid, selector ipld.Node) (datatransfer.ChannelID,
+	error) {
+	chid, err := c.c.dataTransfer.OpenPushDataChannel(ctx, to, voucher, baseCid, selector)
+	return chid, err
+}
+
+func (c *clientDealEnvironment) RestartDataTransfer(ctx context.Context, channelId datatransfer.ChannelID) error {
+	return c.c.dataTransfer.RestartDataTransferChannel(ctx, channelId)
 }
 
 func (c *clientDealEnvironment) GetProviderDealState(ctx context.Context, proposalCid cid.Cid) (*storagemarket.ProviderDealState, error) {
@@ -43,10 +47,6 @@ func (c *clientDealEnvironment) GetProviderDealState(ctx context.Context, propos
 
 func (c *clientDealEnvironment) PollingInterval() time.Duration {
 	return c.c.pollingInterval
-}
-
-func (c *clientDealEnvironment) DealFunds() funds.DealFunds {
-	return c.c.dealFunds
 }
 
 type clientStoreGetter struct {

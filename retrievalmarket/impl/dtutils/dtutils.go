@@ -31,6 +31,8 @@ func providerEvent(event datatransfer.Event, channelState datatransfer.ChannelSt
 	switch event.Code {
 	case datatransfer.Accept:
 		return rm.ProviderEventDealAccepted, []interface{}{channelState.ChannelID()}
+	case datatransfer.Disconnected:
+		return rm.ProviderEventDataTransferError, []interface{}{fmt.Errorf("deal data transfer stalled (peer hungup)")}
 	case datatransfer.Error:
 		return rm.ProviderEventDataTransferError, []interface{}{fmt.Errorf("deal data transfer failed: %s", event.Message)}
 	case datatransfer.Cancel:
@@ -98,7 +100,7 @@ const noEvent = rm.ClientEvent(math.MaxUint64)
 
 func clientEvent(event datatransfer.Event, channelState datatransfer.ChannelState) (rm.ClientEvent, []interface{}) {
 	switch event.Code {
-	case datatransfer.Progress:
+	case datatransfer.DataReceived:
 		return rm.ClientEventBlocksReceived, []interface{}{channelState.Received()}
 	case datatransfer.FinishTransfer:
 		return rm.ClientEventAllBlocksReceived, nil
@@ -112,6 +114,8 @@ func clientEvent(event datatransfer.Event, channelState datatransfer.ChannelStat
 		}
 
 		return clientEventForResponse(response)
+	case datatransfer.Disconnected:
+		return rm.ClientEventDataTransferError, []interface{}{fmt.Errorf("deal data transfer stalled (peer hungup)")}
 	case datatransfer.Error:
 		if channelState.Message() == datatransfer.ErrRejected.Error() {
 			return rm.ClientEventDealRejected, []interface{}{"rejected for unknown reasons"}
@@ -125,7 +129,7 @@ func clientEvent(event datatransfer.Event, channelState datatransfer.ChannelStat
 
 // ClientDataTransferSubscriber is the function called when an event occurs in a data
 // transfer initiated on the client -- it reads the voucher to verify this even occurred
-// in a storage market deal, then, based on the data transfer event that occurred, it dispatches
+// in a retrieval market deal, then, based on the data transfer event that occurred, it dispatches
 // an event to the appropriate state machine
 func ClientDataTransferSubscriber(deals EventReceiver) datatransfer.Subscriber {
 	return func(event datatransfer.Event, channelState datatransfer.ChannelState) {
@@ -144,7 +148,8 @@ func ClientDataTransferSubscriber(deals EventReceiver) datatransfer.Subscriber {
 		// data transfer events for progress do not affect deal state
 		err := deals.Send(dealProposal.ID, retrievalEvent, params...)
 		if err != nil {
-			log.Errorf("processing dt event: %w", err)
+			log.Errorf("processing dt event %s for state %s: %s",
+				datatransfer.Events[event.Code], datatransfer.Statuses[channelState.Status()], err)
 		}
 	}
 }

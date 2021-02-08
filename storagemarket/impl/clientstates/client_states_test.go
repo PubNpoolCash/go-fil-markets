@@ -24,58 +24,45 @@ import (
 	tut "github.com/filecoin-project/go-fil-markets/shared_testutil"
 	"github.com/filecoin-project/go-fil-markets/storagemarket"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/clientstates"
-	"github.com/filecoin-project/go-fil-markets/storagemarket/impl/funds"
 	smnet "github.com/filecoin-project/go-fil-markets/storagemarket/network"
 	"github.com/filecoin-project/go-fil-markets/storagemarket/testnodes"
 )
 
 var clientDealProposal = tut.MakeTestClientDealProposal()
 
-func TestEnsureFunds(t *testing.T) {
+func TestReserveClientFunds(t *testing.T) {
 	t.Run("immediately succeeds", func(t *testing.T) {
-		runAndInspect(t, storagemarket.StorageDealEnsureClientFunds, clientstates.EnsureClientFunds, testCase{
+		runAndInspect(t, storagemarket.StorageDealReserveClientFunds, clientstates.ReserveClientFunds, testCase{
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
-				tut.AssertDealState(t, storagemarket.StorageDealFundsEnsured, deal.State)
-				assert.Equal(t, env.dealFunds.ReserveCalls[0], deal.Proposal.ClientBalanceRequirement())
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
+				tut.AssertDealState(t, storagemarket.StorageDealFundsReserved, deal.State)
+				assert.Equal(t, env.node.DealFunds.ReserveCalls[0], deal.Proposal.ClientBalanceRequirement())
+				assert.Len(t, env.node.DealFunds.ReleaseCalls, 0)
 				assert.Equal(t, deal.Proposal.ClientBalanceRequirement(), deal.FundsReserved)
-			},
-		})
-	})
-	t.Run("resume, funds reserved prior", func(t *testing.T) {
-		runAndInspect(t, storagemarket.StorageDealEnsureClientFunds, clientstates.EnsureClientFunds, testCase{
-			stateParams: dealStateParams{
-				reserveFunds: true,
-			},
-			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
-				tut.AssertDealState(t, storagemarket.StorageDealFundsEnsured, deal.State)
-				assert.Len(t, env.dealFunds.ReserveCalls, 0)
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
 			},
 		})
 	})
 	t.Run("succeeds by sending an AddFunds message", func(t *testing.T) {
-		runAndInspect(t, storagemarket.StorageDealEnsureClientFunds, clientstates.EnsureClientFunds, testCase{
+		runAndInspect(t, storagemarket.StorageDealReserveClientFunds, clientstates.ReserveClientFunds, testCase{
 			nodeParams: nodeParams{AddFundsCid: tut.GenerateCids(1)[0]},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealClientFunding, deal.State)
-				assert.Equal(t, env.dealFunds.ReserveCalls[0], deal.Proposal.ClientBalanceRequirement())
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
+				assert.Equal(t, env.node.DealFunds.ReserveCalls[0], deal.Proposal.ClientBalanceRequirement())
+				assert.Len(t, env.node.DealFunds.ReleaseCalls, 0)
 				assert.Equal(t, deal.Proposal.ClientBalanceRequirement(), deal.FundsReserved)
 			},
 		})
 	})
-	t.Run("EnsureClientFunds fails", func(t *testing.T) {
-		runAndInspect(t, storagemarket.StorageDealEnsureClientFunds, clientstates.EnsureClientFunds, testCase{
+	t.Run("Reserve fails", func(t *testing.T) {
+		runAndInspect(t, storagemarket.StorageDealReserveClientFunds, clientstates.ReserveClientFunds, testCase{
 			nodeParams: nodeParams{
-				EnsureFundsError: errors.New("Something went wrong"),
+				ReserveFundsError: errors.New("Something went wrong"),
 			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealFailing, deal.State)
 				assert.Equal(t, "adding market funds failed: Something went wrong", deal.Message)
-				assert.Equal(t, env.dealFunds.ReserveCalls[0], deal.Proposal.ClientBalanceRequirement())
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
-				assert.Equal(t, deal.Proposal.ClientBalanceRequirement(), deal.FundsReserved)
+				assert.Len(t, env.node.DealFunds.ReserveCalls, 0)
+				assert.Len(t, env.node.DealFunds.ReleaseCalls, 0)
+				assert.True(t, deal.FundsReserved.Nil())
 			},
 		})
 	})
@@ -86,11 +73,11 @@ func TestWaitForFunding(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealClientFunding, clientstates.WaitForFunding, testCase{
 			nodeParams: nodeParams{WaitForMessageExitCode: exitcode.Ok},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
-				tut.AssertDealState(t, storagemarket.StorageDealFundsEnsured, deal.State)
+				tut.AssertDealState(t, storagemarket.StorageDealFundsReserved, deal.State)
 			},
 		})
 	})
-	t.Run("EnsureClientFunds fails", func(t *testing.T) {
+	t.Run("ReserveFunds fails", func(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealClientFunding, clientstates.WaitForFunding, testCase{
 			nodeParams: nodeParams{WaitForMessageExitCode: exitcode.ErrInsufficientFunds},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
@@ -109,7 +96,7 @@ func TestProposeDeal(t *testing.T) {
 				proposal: clientDealProposal,
 			}),
 		})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams:  envParams{dealStream: ds},
 			nodeParams: nodeParams{WaitForMessageExitCode: exitcode.Ok},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
@@ -134,7 +121,7 @@ func TestProposeDeal(t *testing.T) {
 			},
 		})
 
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams:   envParams{dealStream: ds},
 			stateParams: dealStateParams{fastRetrieval: true},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
@@ -147,7 +134,7 @@ func TestProposeDeal(t *testing.T) {
 		ds := tut.NewTestStorageDealStream(tut.TestStorageDealStreamParams{
 			ProposalWriter: tut.FailStorageProposalWriter,
 		})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams:  envParams{dealStream: ds},
 			nodeParams: nodeParams{WaitForMessageExitCode: exitcode.Ok},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
@@ -160,7 +147,7 @@ func TestProposeDeal(t *testing.T) {
 		ds := tut.NewTestStorageDealStream(tut.TestStorageDealStreamParams{
 			ResponseReader: tut.FailStorageResponseReader,
 		})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams: envParams{
 				dealStream: ds,
 			},
@@ -173,7 +160,7 @@ func TestProposeDeal(t *testing.T) {
 	t.Run("closing the stream fails", func(t *testing.T) {
 		ds := tut.NewTestStorageDealStream(tut.TestStorageDealStreamParams{})
 		ds.CloseError = xerrors.Errorf("failed to close stream")
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams: envParams{dealStream: ds},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
@@ -183,7 +170,7 @@ func TestProposeDeal(t *testing.T) {
 	})
 	t.Run("getting chain head fails", func(t *testing.T) {
 		ds := tut.NewTestStorageDealStream(tut.TestStorageDealStreamParams{})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams: envParams{
 				dealStream: ds,
 			},
@@ -198,7 +185,7 @@ func TestProposeDeal(t *testing.T) {
 	})
 	t.Run("verify signature fails", func(t *testing.T) {
 		ds := tut.NewTestStorageDealStream(tut.TestStorageDealStreamParams{})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams: envParams{
 				dealStream: ds,
 			},
@@ -219,7 +206,7 @@ func TestProposeDeal(t *testing.T) {
 				message:  "couldn't find deal in store",
 			}),
 		})
-		runAndInspect(t, storagemarket.StorageDealFundsEnsured, clientstates.ProposeDeal, testCase{
+		runAndInspect(t, storagemarket.StorageDealFundsReserved, clientstates.ProposeDeal, testCase{
 			envParams: envParams{
 				dealStream: ds,
 			},
@@ -234,14 +221,18 @@ func TestProposeDeal(t *testing.T) {
 func TestInitiateDataTransfer(t *testing.T) {
 	t.Run("succeeds and starts the data transfer", func(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealStartDataTransfer, clientstates.InitiateDataTransfer, testCase{
+			envParams: envParams{
+				dataTransferChannelId: datatransfer.ChannelID{Initiator: peer.ID("1"), Responder: peer.ID("2"), ID: datatransfer.TransferID(1)},
+			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				assert.Len(t, env.startDataTransferCalls, 1)
 				assert.Equal(t, env.startDataTransferCalls[0].to, deal.Miner)
 				assert.Equal(t, env.startDataTransferCalls[0].baseCid, deal.DataRef.Root)
-				tut.AssertDealState(t, storagemarket.StorageDealTransferring, deal.State)
+				assert.Equal(t, storagemarket.StorageDealStartDataTransfer, deal.State)
 			},
 		})
 	})
+
 	t.Run("starts polling for acceptance with manual transfers", func(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealStartDataTransfer, clientstates.InitiateDataTransfer, testCase{
 			envParams: envParams{
@@ -253,12 +244,31 @@ func TestInitiateDataTransfer(t *testing.T) {
 			},
 		})
 	})
+
 	t.Run("fails if it can't initiate data transfer", func(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealStartDataTransfer, clientstates.InitiateDataTransfer, testCase{
 			envParams: envParams{
 				startDataTransferError: xerrors.Errorf("failed to start data transfer"),
 			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				tut.AssertDealState(t, storagemarket.StorageDealFailing, deal.State)
+			},
+		})
+	})
+}
+
+func TestRestartDataTransfer(t *testing.T) {
+	t.Run("fails if can't restart data transfer", func(t *testing.T) {
+		err := xerrors.New("error")
+
+		runAndInspect(t, storagemarket.StorageDealClientTransferRestart, clientstates.RestartDataTransfer, testCase{
+			envParams: envParams{
+				restartDataTransferError: err,
+			},
+			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				assert.Len(t, env.restartDataTransferCalls, 1)
+				assert.Equal(t, datatransfer.ChannelID{}, env.restartDataTransferCalls[0].channelId)
+				assert.Equal(t, xerrors.Errorf("failed to restart data transfer: %w", err).Error(), deal.Message)
 				tut.AssertDealState(t, storagemarket.StorageDealFailing, deal.State)
 			},
 		})
@@ -284,6 +294,7 @@ func TestCheckForDealAcceptance(t *testing.T) {
 	t.Run("succeeds when provider indicates a successful deal", func(t *testing.T) {
 		successStates := []storagemarket.StorageDealStatus{
 			storagemarket.StorageDealActive,
+			storagemarket.StorageDealAwaitingPreCommit,
 			storagemarket.StorageDealSealing,
 			storagemarket.StorageDealStaged,
 			storagemarket.StorageDealSlashed,
@@ -329,6 +340,7 @@ func TestCheckForDealAcceptance(t *testing.T) {
 				tut.AssertDealState(t, storagemarket.StorageDealCheckForAcceptance, deal.State)
 				assert.Equal(t, uint64(1), deal.PollRetryCount)
 				assert.Equal(t, uint64(1), deal.PollErrorCount)
+				assert.Equal(t, "Provider state: StorageDealUnknown", deal.Message)
 			},
 		})
 	})
@@ -340,6 +352,7 @@ func TestCheckForDealAcceptance(t *testing.T) {
 			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealCheckForAcceptance, deal.State)
+				assert.Equal(t, "Provider state: StorageDealVerifyData", deal.Message)
 			},
 		})
 	})
@@ -366,9 +379,9 @@ func TestValidateDealPublished(t *testing.T) {
 				reserveFunds: true,
 			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
-				tut.AssertDealState(t, storagemarket.StorageDealSealing, deal.State)
+				tut.AssertDealState(t, storagemarket.StorageDealAwaitingPreCommit, deal.State)
 				assert.Equal(t, abi.DealID(5), deal.DealID)
-				assert.Equal(t, env.dealFunds.ReleaseCalls[0], deal.Proposal.ClientBalanceRequirement())
+				assert.Equal(t, env.node.DealFunds.ReleaseCalls[0], deal.Proposal.ClientBalanceRequirement())
 				assert.True(t, deal.FundsReserved.Nil() || deal.FundsReserved.IsZero())
 				assert.Len(t, env.peerTagger.UntagCalls, 1)
 				assert.Equal(t, deal.Miner, env.peerTagger.UntagCalls[0])
@@ -379,9 +392,9 @@ func TestValidateDealPublished(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealProposalAccepted, clientstates.ValidateDealPublished, testCase{
 			nodeParams: nodeParams{ValidatePublishedDealID: abi.DealID(5)},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
-				tut.AssertDealState(t, storagemarket.StorageDealSealing, deal.State)
+				tut.AssertDealState(t, storagemarket.StorageDealAwaitingPreCommit, deal.State)
 				assert.Equal(t, abi.DealID(5), deal.DealID)
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
+				assert.Len(t, env.node.DealFunds.ReleaseCalls, 0)
 				assert.Len(t, env.peerTagger.UntagCalls, 1)
 				assert.Equal(t, deal.Miner, env.peerTagger.UntagCalls[0])
 			},
@@ -396,6 +409,44 @@ func TestValidateDealPublished(t *testing.T) {
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
 				assert.Equal(t, "error validating deal published: Something went wrong", deal.Message)
+			},
+		})
+	})
+}
+
+func TestVerifyDealPreCommitted(t *testing.T) {
+	t.Run("succeeds", func(t *testing.T) {
+		runAndInspect(t, storagemarket.StorageDealAwaitingPreCommit, clientstates.VerifyDealPreCommitted, testCase{
+			nodeParams: nodeParams{PreCommittedSectorNumber: abi.SectorNumber(10)},
+			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				tut.AssertDealState(t, storagemarket.StorageDealSealing, deal.State)
+				assert.Equal(t, abi.SectorNumber(10), deal.SectorNumber)
+			},
+		})
+	})
+	t.Run("succeeds, active", func(t *testing.T) {
+		runAndInspect(t, storagemarket.StorageDealAwaitingPreCommit, clientstates.VerifyDealPreCommitted, testCase{
+			nodeParams: nodeParams{PreCommittedIsActive: true},
+			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				tut.AssertDealState(t, storagemarket.StorageDealActive, deal.State)
+			},
+		})
+	})
+	t.Run("fails synchronously", func(t *testing.T) {
+		runAndInspect(t, storagemarket.StorageDealAwaitingPreCommit, clientstates.VerifyDealPreCommitted, testCase{
+			nodeParams: nodeParams{DealPreCommittedSyncError: errors.New("Something went wrong")},
+			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
+				assert.Equal(t, "error awaiting deal pre-commit: Something went wrong", deal.Message)
+			},
+		})
+	})
+	t.Run("fails asynchronously", func(t *testing.T) {
+		runAndInspect(t, storagemarket.StorageDealAwaitingPreCommit, clientstates.VerifyDealPreCommitted, testCase{
+			nodeParams: nodeParams{DealPreCommittedAsyncError: errors.New("Something went wrong later")},
+			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
+				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
+				assert.Equal(t, "error awaiting deal pre-commit: Something went wrong later", deal.Message)
 			},
 		})
 	})
@@ -485,7 +536,7 @@ func TestFailDeal(t *testing.T) {
 			},
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
-				assert.Equal(t, env.dealFunds.ReleaseCalls[0], deal.Proposal.ClientBalanceRequirement())
+				assert.Equal(t, env.node.DealFunds.ReleaseCalls[0], deal.Proposal.ClientBalanceRequirement())
 				assert.True(t, deal.FundsReserved.Nil() || deal.FundsReserved.IsZero())
 			},
 		})
@@ -494,7 +545,7 @@ func TestFailDeal(t *testing.T) {
 		runAndInspect(t, storagemarket.StorageDealFailing, clientstates.FailDeal, testCase{
 			inspector: func(deal storagemarket.ClientDeal, env *fakeEnvironment) {
 				tut.AssertDealState(t, storagemarket.StorageDealError, deal.State)
-				assert.Len(t, env.dealFunds.ReleaseCalls, 0)
+				assert.Len(t, env.node.DealFunds.ReleaseCalls, 0)
 				assert.True(t, deal.FundsReserved.Nil() || deal.FundsReserved.IsZero())
 			},
 		})
@@ -502,12 +553,14 @@ func TestFailDeal(t *testing.T) {
 }
 
 type envParams struct {
-	dealStream             *tut.TestStorageDealStream
-	startDataTransferError error
-	manualTransfer         bool
-	providerDealState      *storagemarket.ProviderDealState
-	getDealStatusErr       error
-	pollingInterval        time.Duration
+	dealStream               *tut.TestStorageDealStream
+	startDataTransferError   error
+	restartDataTransferError error
+	dataTransferChannelId    datatransfer.ChannelID
+	manualTransfer           bool
+	providerDealState        *storagemarket.ProviderDealState
+	getDealStatusErr         error
+	pollingInterval          time.Duration
 }
 
 type dealStateParams struct {
@@ -536,6 +589,7 @@ func makeExecutor(ctx context.Context,
 		assert.NoError(t, err)
 		dealState.AddFundsCid = &tut.GenerateCids(1)[0]
 		dealState.FastRetrieval = dealParams.fastRetrieval
+		dealState.TransferChannelID = &datatransfer.ChannelID{}
 
 		if dealParams.addFundsCid != nil {
 			dealState.AddFundsCid = dealParams.addFundsCid
@@ -544,14 +598,15 @@ func makeExecutor(ctx context.Context,
 			dealState.FundsReserved = clientDealProposal.Proposal.ClientBalanceRequirement()
 		}
 		environment := &fakeEnvironment{
-			node:                   node,
-			dealStream:             envParams.dealStream,
-			startDataTransferError: envParams.startDataTransferError,
-			providerDealState:      envParams.providerDealState,
-			getDealStatusErr:       envParams.getDealStatusErr,
-			pollingInterval:        envParams.pollingInterval,
-			dealFunds:              tut.NewTestDealFunds(),
-			peerTagger:             tut.NewTestPeerTagger(),
+			node:                       node,
+			dealStream:                 envParams.dealStream,
+			startDataTransferError:     envParams.startDataTransferError,
+			startDataTransferChannelId: envParams.dataTransferChannelId,
+			restartDataTransferError:   envParams.restartDataTransferError,
+			providerDealState:          envParams.providerDealState,
+			getDealStatusErr:           envParams.getDealStatusErr,
+			pollingInterval:            envParams.pollingInterval,
+			peerTagger:                 tut.NewTestPeerTagger(),
 		}
 
 		if environment.pollingInterval == 0 {
@@ -569,7 +624,7 @@ func makeExecutor(ctx context.Context,
 
 type nodeParams struct {
 	AddFundsCid                cid.Cid
-	EnsureFundsError           error
+	ReserveFundsError          error
 	VerifySignatureFails       bool
 	GetBalanceError            error
 	GetChainHeadError          error
@@ -581,6 +636,10 @@ type nodeParams struct {
 	ValidationError            error
 	ValidatePublishedDealID    abi.DealID
 	ValidatePublishedError     error
+	PreCommittedSectorNumber   abi.SectorNumber
+	PreCommittedIsActive       bool
+	DealPreCommittedSyncError  error
+	DealPreCommittedAsyncError error
 	DealCommittedSyncError     error
 	DealCommittedAsyncError    error
 	WaitForDealCompletionError error
@@ -589,11 +648,12 @@ type nodeParams struct {
 	OnDealSlashedEpoch         abi.ChainEpoch
 }
 
-func makeNode(params nodeParams) storagemarket.StorageClientNode {
+func makeNode(params nodeParams) *testnodes.FakeClientNode {
 	var out testnodes.FakeClientNode
 	out.SMState = testnodes.NewStorageMarketState()
+	out.DealFunds = tut.NewTestDealFunds()
 	out.AddFundsCid = params.AddFundsCid
-	out.EnsureFundsError = params.EnsureFundsError
+	out.ReserveFundsError = params.ReserveFundsError
 	out.VerifySignatureFails = params.VerifySignatureFails
 	out.GetBalanceError = params.GetBalanceError
 	out.GetChainHeadError = params.GetChainHeadError
@@ -605,6 +665,10 @@ func makeNode(params nodeParams) storagemarket.StorageClientNode {
 	out.ValidationError = params.ValidationError
 	out.ValidatePublishedDealID = params.ValidatePublishedDealID
 	out.ValidatePublishedError = params.ValidatePublishedError
+	out.PreCommittedSectorNumber = params.PreCommittedSectorNumber
+	out.PreCommittedIsActive = params.PreCommittedIsActive
+	out.DealPreCommittedSyncError = params.DealPreCommittedSyncError
+	out.DealPreCommittedAsyncError = params.DealPreCommittedAsyncError
 	out.DealCommittedSyncError = params.DealCommittedSyncError
 	out.DealCommittedAsyncError = params.DealCommittedAsyncError
 	out.WaitForDealCompletionError = params.WaitForDealCompletionError
@@ -615,15 +679,21 @@ func makeNode(params nodeParams) storagemarket.StorageClientNode {
 }
 
 type fakeEnvironment struct {
-	node                   storagemarket.StorageClientNode
-	dealStream             *tut.TestStorageDealStream
-	startDataTransferError error
+	node       *testnodes.FakeClientNode
+	dealStream *tut.TestStorageDealStream
+
+	startDataTransferChannelId datatransfer.ChannelID
+	startDataTransferError     error
+
 	startDataTransferCalls []dataTransferParams
-	providerDealState      *storagemarket.ProviderDealState
-	getDealStatusErr       error
-	pollingInterval        time.Duration
-	dealFunds              *tut.TestDealFunds
-	peerTagger             *tut.TestPeerTagger
+
+	restartDataTransferError error
+	restartDataTransferCalls []restartDataTransferParams
+
+	providerDealState *storagemarket.ProviderDealState
+	getDealStatusErr  error
+	pollingInterval   time.Duration
+	peerTagger        *tut.TestPeerTagger
 }
 
 type dataTransferParams struct {
@@ -633,14 +703,24 @@ type dataTransferParams struct {
 	selector ipld.Node
 }
 
-func (fe *fakeEnvironment) StartDataTransfer(_ context.Context, to peer.ID, voucher datatransfer.Voucher, baseCid cid.Cid, selector ipld.Node) error {
+type restartDataTransferParams struct {
+	channelId datatransfer.ChannelID
+}
+
+func (fe *fakeEnvironment) StartDataTransfer(_ context.Context, to peer.ID, voucher datatransfer.Voucher, baseCid cid.Cid, selector ipld.Node) (datatransfer.ChannelID, error) {
 	fe.startDataTransferCalls = append(fe.startDataTransferCalls, dataTransferParams{
 		to:       to,
 		voucher:  voucher,
 		baseCid:  baseCid,
 		selector: selector,
 	})
-	return fe.startDataTransferError
+	return fe.startDataTransferChannelId, fe.startDataTransferError
+}
+
+func (fe *fakeEnvironment) RestartDataTransfer(_ context.Context, channelId datatransfer.ChannelID) error {
+	fe.restartDataTransferCalls = append(fe.restartDataTransferCalls, restartDataTransferParams{channelId: channelId})
+
+	return fe.restartDataTransferError
 }
 
 func (fe *fakeEnvironment) Node() storagemarket.StorageClientNode {
@@ -664,10 +744,6 @@ func (fe *fakeEnvironment) GetProviderDealState(_ context.Context, _ cid.Cid) (*
 
 func (fe *fakeEnvironment) PollingInterval() time.Duration {
 	return fe.pollingInterval
-}
-
-func (fe *fakeEnvironment) DealFunds() funds.DealFunds {
-	return fe.dealFunds
 }
 
 func (fe *fakeEnvironment) TagPeer(id peer.ID, ident string) {
